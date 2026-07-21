@@ -114,3 +114,38 @@ func (h *UserHandler) UpdatePublicKey(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
 }
+
+type UpdatePresenceRequest struct {
+	Activity string `json:"activity"`
+}
+
+func (h *UserHandler) UpdatePresence(w http.ResponseWriter, r *http.Request) {
+	userID := middleware.GetUserID(r)
+	if userID == "" { writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"}); return }
+
+	var req UpdatePresenceRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"}); return
+	}
+
+	if err := h.db.UpdatePresence(userID, req.Activity); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to update presence"}); return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
+}
+
+func (h *UserHandler) GetPulse(w http.ResponseWriter, r *http.Request) {
+	userID := middleware.GetUserID(r)
+	if userID == "" { writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"}); return }
+	// We can let any authenticated user get pulse of anyone, but for now we'll just check the target
+	// wait, let's just get the pulse for the requesting user since there is no ID param in the route right now
+	// actually, the route is /users/{id}/pulse
+	targetID := r.URL.Path[len("/api/v1/users/"):len(r.URL.Path)-len("/pulse")]
+	if targetID == "" { targetID = userID } // fallback
+
+	pulse, err := h.db.GetPulse(targetID)
+	if err != nil { writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()}); return }
+	if pulse == nil { pulse = []models.PulseEntry{} }
+
+	writeJSON(w, http.StatusOK, pulse)
+}

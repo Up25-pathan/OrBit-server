@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/orbit/control-server/internal/license"
 	"github.com/orbit/control-server/internal/middleware"
 	"github.com/orbit/control-server/internal/models"
 	"github.com/orbit/control-server/internal/repository"
@@ -12,72 +13,45 @@ import (
 
 type AuthHandler struct {
 	db        *repository.DB
+	validator license.LicenseValidator
 	jwtSecret string
 	jwtExpiry time.Duration
 }
 
-func NewAuthHandler(db *repository.DB, jwtSecret string, jwtExpiry time.Duration) *AuthHandler {
-	return &AuthHandler{db: db, jwtSecret: jwtSecret, jwtExpiry: jwtExpiry}
+func NewAuthHandler(db *repository.DB, validator license.LicenseValidator, jwtSecret string, jwtExpiry time.Duration) *AuthHandler {
+	return &AuthHandler{db: db, validator: validator, jwtSecret: jwtSecret, jwtExpiry: jwtExpiry}
 }
 
-func (h *AuthHandler) Signup(w http.ResponseWriter, r *http.Request) {
-	var req models.SignupRequest
+// AuthenticateKey is the single authentication endpoint.
+// Flow: Desktop → Go Server → LicenseValidator → UpsertUser → JWT → Desktop logged in.
+func (h *AuthHandler) AuthenticateKey(w http.ResponseWriter, r *http.Request) {
+	var req models.LicenseAuthRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
 		return
 	}
 
-	if req.DisplayName == "" || req.Email == "" || req.Password == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "displayName, email, and password are required"})
-		return
-	}
-	if len(req.Password) < 6 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "password must be at least 6 characters"})
+	if req.LicenseKey == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "licenseKey is required"})
 		return
 	}
 
-	user, err := h.db.CreateUser(req)
+	// Validate the license key against the authority (mock today, website later)
+	info, err := h.validator.Validate(req.LicenseKey)
 	if err != nil {
-		if err.Error() == "email already registered" {
-			writeJSON(w, http.StatusConflict, map[string]string{"error": "email already registered"})
-			return
-		}
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create user"})
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid license key"})
 		return
 	}
 
-	token, err := middleware.GenerateToken(user.ID, h.jwtSecret)
+	// Upsert the user — creates if new, updates metadata if existing
+	user, err := h.db.UpsertUser(info.UserID, info.Name, info.Email, info.PlanTier, req.LicenseKey)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to generate token"})
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create user session"})
 		return
 	}
 
-	writeJSON(w, http.StatusCreated, models.AuthResponse{Token: token, User: *user})
-}
-
-func (h *AuthHandler) Signin(w http.ResponseWriter, r *http.Request) {
-	var req models.SigninRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
-		return
-	}
-
-	if req.Email == "" || req.Password == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "email and password are required"})
-		return
-	}
-
-	user, err := h.db.GetUserByEmail(req.Email)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "server error"})
-		return
-	}
-	if user == nil || !h.db.VerifyPassword(user, req.Password) {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid email or password"})
-		return
-	}
-
-	token, err := middleware.GenerateToken(user.ID, h.jwtSecret)
+	// Generate JWT with enriched claims
+	token, err := middleware.GenerateToken(user.ID, user.Email, user.PlanTier, req.LicenseKey, h.jwtSecret)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to generate token"})
 		return

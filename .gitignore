@@ -1,0 +1,5 @@
+*.exe
+*.db
+*.json
+!go.json
+.vscode/

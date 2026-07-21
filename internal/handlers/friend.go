@@ -113,3 +113,24 @@ func (h *FriendHandler) ListFriends(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, friends)
 }
+
+func (h *FriendHandler) DeclineRequest(w http.ResponseWriter, r *http.Request) {
+	userID := middleware.GetUserID(r)
+	if userID == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+
+	requestID := r.URL.Query().Get("id")
+	if requestID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "request id is required"})
+		return
+	}
+
+	if err := h.db.RejectFriendRequest(requestID); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "declined"})
+}

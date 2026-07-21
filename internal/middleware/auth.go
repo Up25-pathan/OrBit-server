@@ -17,18 +17,24 @@ type contextKey string
 const UserIDKey contextKey = "userID"
 
 type TokenClaims struct {
-	Sub string `json:"sub"`
-	Iat int64  `json:"iat"`
-	Exp int64  `json:"exp"`
+	Sub      string `json:"sub"`
+	Email    string `json:"email,omitempty"`
+	PlanTier string `json:"planTier,omitempty"`
+	License  string `json:"license,omitempty"`
+	Iat      int64  `json:"iat"`
+	Exp      int64  `json:"exp"`
 }
 
-func GenerateToken(userID, secret string) (string, error) {
+func GenerateToken(userID, email, planTier, license, secret string) (string, error) {
 	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
 
 	claims := TokenClaims{
-		Sub: userID,
-		Iat: time.Now().Unix(),
-		Exp: time.Now().Add(72 * time.Hour).Unix(),
+		Sub:      userID,
+		Email:    email,
+		PlanTier: planTier,
+		License:  license,
+		Iat:      time.Now().Unix(),
+		Exp:      time.Now().Add(72 * time.Hour).Unix(),
 	}
 	claimsJSON, err := json.Marshal(claims)
 	if err != nil { return "", err }

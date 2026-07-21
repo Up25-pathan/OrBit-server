@@ -1,6 +1,9 @@
 package config
 
 import (
+	"crypto/rand"
+	"encoding/hex"
+	"log"
 	"os"
 	"time"
 )
@@ -28,7 +31,12 @@ func Load() *Config {
 
 	secret := os.Getenv("ORBIT_JWT_SECRET")
 	if secret == "" {
-		secret = "orbit-dev-secret-change-in-production"
+		b := make([]byte, 32)
+		if _, err := rand.Read(b); err != nil {
+			log.Fatalf("failed to generate random JWT secret: %v", err)
+		}
+		secret = hex.EncodeToString(b)
+		log.Println("WARNING: ORBIT_JWT_SECRET not set. Auto-generated a random secret for this session. Logins will not persist across server restarts.")
 	}
 
 	return &Config{
