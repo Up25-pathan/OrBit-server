@@ -38,6 +38,12 @@ var mockKeys = map[string]*LicenseInfo{
 		Email:    "tester@orbit.dev",
 		PlanTier: "pro",
 	},
+	"ORBIT-PRO-DEVTEST": {
+		UserID:   "usr_devtest_003",
+		Name:     "DevTester",
+		Email:    "devtester@orbit.dev",
+		PlanTier: "pro",
+	},
 }
 
 // Validate checks the provided key against the mock database.
