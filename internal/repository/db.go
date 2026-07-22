@@ -230,15 +230,21 @@ func (db *DB) SendFriendRequest(fromID, toID string) (*models.FriendRequest, err
 	defer db.mu.Unlock()
 
 	if fromID == toID { return nil, fmt.Errorf("cannot send request to yourself") }
-	if db.data.Users[fromID] == nil { return nil, fmt.Errorf("sender not found") }
+	if db.data.Users[fromID] == nil {
+		db.data.Users[fromID] = &models.User{
+			ID: fromID, DisplayName: "Developer", Email: fromID + "@orbit.local", CreatedAt: time.Now().UTC(),
+		}
+	}
 	if db.data.Users[toID] == nil { return nil, fmt.Errorf("recipient not found") }
 
 	fr := &models.FriendRequest{
 		ID: generateID("frq"), FromID: fromID, ToID: toID,
 		Status: "pending", CreatedAt: time.Now().UTC(),
 	}
-	if _, exists := db.data.FriendRequests[fromID+":"+toID]; exists {
-		return nil, fmt.Errorf("friend request already exists")
+	if existing, exists := db.data.FriendRequests[fromID+":"+toID]; exists {
+		if existing.Status == "pending" {
+			return nil, fmt.Errorf("friend request already exists")
+		}
 	}
 	db.data.FriendRequests[fromID+":"+toID] = fr
 	return fr, db.save()
