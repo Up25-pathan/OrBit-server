@@ -25,6 +25,7 @@ func NewAuthHandler(db *repository.DB, validator license.LicenseValidator, jwtSe
 // AuthenticateKey is the single authentication endpoint.
 // Flow: Desktop → Go Server → LicenseValidator → UpsertUser → JWT → Desktop logged in.
 func (h *AuthHandler) AuthenticateKey(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
 	var req models.LicenseAuthRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
@@ -51,11 +52,12 @@ func (h *AuthHandler) AuthenticateKey(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Generate JWT with enriched claims
-	token, err := middleware.GenerateToken(user.ID, user.Email, user.PlanTier, req.LicenseKey, h.jwtSecret)
+	token, err := middleware.GenerateToken(user.ID, user.Email, user.PlanTier, h.jwtSecret)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to generate token"})
 		return
 	}
 
-	writeJSON(w, http.StatusOK, models.AuthResponse{Token: token, User: *user})
+	safeUser := *user
+	writeJSON(w, http.StatusOK, models.AuthResponse{Token: token, User: safeUser})
 }

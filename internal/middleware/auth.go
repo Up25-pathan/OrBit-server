@@ -6,7 +6,6 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -20,19 +19,17 @@ type TokenClaims struct {
 	Sub      string `json:"sub"`
 	Email    string `json:"email,omitempty"`
 	PlanTier string `json:"planTier,omitempty"`
-	License  string `json:"license,omitempty"`
 	Iat      int64  `json:"iat"`
 	Exp      int64  `json:"exp"`
 }
 
-func GenerateToken(userID, email, planTier, license, secret string) (string, error) {
+func GenerateToken(userID, email, planTier, secret string) (string, error) {
 	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
 
 	claims := TokenClaims{
 		Sub:      userID,
 		Email:    email,
 		PlanTier: planTier,
-		License:  license,
 		Iat:      time.Now().Unix(),
 		Exp:      time.Now().Add(72 * time.Hour).Unix(),
 	}
@@ -51,7 +48,7 @@ func GenerateToken(userID, email, planTier, license, secret string) (string, err
 func VerifyToken(tokenStr, secret string) (*TokenClaims, error) {
 	parts := strings.Split(tokenStr, ".")
 	if len(parts) != 3 {
-		return nil, fmt.Errorf("invalid token format")
+		return nil, errInvalidToken
 	}
 
 	sigInput := parts[0] + "." + parts[1]
@@ -60,23 +57,29 @@ func VerifyToken(tokenStr, secret string) (*TokenClaims, error) {
 	expectedSig := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 
 	if !hmac.Equal([]byte(parts[2]), []byte(expectedSig)) {
-		return nil, fmt.Errorf("invalid signature")
+		return nil, errInvalidToken
 	}
 
 	claimsJSON, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil { return nil, fmt.Errorf("invalid payload: %w", err) }
+	if err != nil { return nil, errInvalidToken }
 
 	var claims TokenClaims
 	if err := json.Unmarshal(claimsJSON, &claims); err != nil {
-		return nil, fmt.Errorf("invalid claims: %w", err)
+		return nil, errInvalidToken
 	}
 
 	if time.Now().Unix() > claims.Exp {
-		return nil, fmt.Errorf("token expired")
+		return nil, errInvalidToken
 	}
 
 	return &claims, nil
 }
+
+var errInvalidToken = &tokenError{"invalid token"}
+
+type tokenError struct{ msg string }
+
+func (e *tokenError) Error() string { return e.msg }
 
 func AuthMiddleware(jwtSecret string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
@@ -90,7 +93,7 @@ func AuthMiddleware(jwtSecret string) func(http.Handler) http.Handler {
 			tokenStr := strings.TrimPrefix(auth, "Bearer ")
 			claims, err := VerifyToken(tokenStr, jwtSecret)
 			if err != nil {
-				http.Error(w, fmt.Sprintf(`{"error":"invalid token: %s"}`, err.Error()), http.StatusUnauthorized)
+				http.Error(w, `{"error":"invalid token"}`, http.StatusUnauthorized)
 				return
 			}
 

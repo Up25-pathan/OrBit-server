@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -82,7 +83,25 @@ func (db *DB) load() error {
 func (db *DB) save() error {
 	data, err := json.MarshalIndent(db.data, "", "  ")
 	if err != nil { return err }
-	return os.WriteFile(db.path, data, 0644)
+
+	dir := filepath.Dir(db.path)
+	tmp, err := os.CreateTemp(dir, "orbit-*.tmp")
+	if err != nil { return err }
+	tmpPath := tmp.Name()
+
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return err
+	}
+	tmp.Close()
+
+	return os.Rename(tmpPath, db.path)
 }
 
 func generateID(prefix string) string {
@@ -100,20 +119,16 @@ func (db *DB) UpsertUser(id, name, email, planTier, licenseKey string) (*models.
 	now := time.Now().UTC()
 	existing := db.data.Users[id]
 	if existing != nil {
-		// Update existing user metadata
 		existing.DisplayName = name
 		existing.Email = email
 		existing.PlanTier = planTier
-		existing.LicenseKey = licenseKey
 		existing.UpdatedAt = now
 	} else {
-		// Create new user
 		existing = &models.User{
 			ID:          id,
 			DisplayName: name,
 			Email:       email,
 			PlanTier:    planTier,
-			LicenseKey:  licenseKey,
 			Bio:         "",
 			Status:      "online",
 			CreatedAt:   now,
@@ -425,9 +440,8 @@ func (db *DB) GetDeltas(projectID string, since time.Time) ([]models.ProjectDelt
 		if d.CreatedAt.After(since) {
 			u := db.data.Users[d.AuthorID]
 			if u != nil {
-				d.Author = models.UserSearchResult{
-					ID: u.ID, DisplayName: u.DisplayName, Email: u.Email,
-					Bio: u.Bio, Status: u.Status, AvatarURL: u.AvatarURL,
+				d.Author = models.PublicUser{
+					ID: u.ID, Name: u.DisplayName, Status: u.Status,
 				}
 			}
 			result = append(result, d)
@@ -622,6 +636,30 @@ func (db *DB) GetLeaderboard(projectID string) ([]models.LeaderboardEntry, error
 		results = append(results, *stat)
 	}
 	return results, nil
+}
+
+func (db *DB) IsProjectMember(projectID, userID string) bool {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	for _, m := range db.data.ProjectMembers[projectID] {
+		if m.UserID == userID {
+			return true
+		}
+	}
+	return false
+}
+
+func (db *DB) IsProjectOwner(projectID, userID string) bool {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	for _, m := range db.data.ProjectMembers[projectID] {
+		if m.UserID == userID && m.Role == "owner" {
+			return true
+		}
+	}
+	return false
 }
 
 func (db *DB) UpdateMemberPath(projectID, userID, path string) error {

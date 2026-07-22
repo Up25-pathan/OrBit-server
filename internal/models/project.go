@@ -37,7 +37,7 @@ type ProjectDelta struct {
 	AuthorID  string    `json:"authorId"`
 	Data      string    `json:"data"`
 	CreatedAt time.Time `json:"createdAt"`
-	Author    UserSearchResult `json:"author"`
+	Author    PublicUser `json:"author"`
 }
 
 type CreateProjectRequest struct {

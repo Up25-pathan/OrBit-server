@@ -11,6 +11,8 @@ import (
 	"github.com/orbit/control-server/internal/repository"
 )
 
+const maxRequestBodySize = 1 << 20 // 1 MiB
+
 type ProjectHandler struct {
 	db *repository.DB
 }
@@ -23,6 +25,7 @@ func (h *ProjectHandler) Create(w http.ResponseWriter, r *http.Request) {
 	userID := middleware.GetUserID(r)
 	if userID == "" { writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"}); return }
 
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
 	var req models.CreateProjectRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"}); return
@@ -51,6 +54,10 @@ func (h *ProjectHandler) Members(w http.ResponseWriter, r *http.Request) {
 	if userID == "" { writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"}); return }
 
 	projectID := chi.URLParam(r, "id")
+	if !h.db.IsProjectMember(projectID, userID) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "not a member"}); return
+	}
+
 	members, err := h.db.GetProjectMembers(projectID)
 	if err != nil { writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()}); return }
 	if members == nil { members = []models.ProjectMember{} }
@@ -63,7 +70,11 @@ func (h *ProjectHandler) Invite(w http.ResponseWriter, r *http.Request) {
 	if userID == "" { writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"}); return }
 
 	projectID := chi.URLParam(r, "id")
+	if !h.db.IsProjectMember(projectID, userID) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "not a member"}); return
+	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
 	var req models.InviteMemberRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"}); return
@@ -81,7 +92,11 @@ func (h *ProjectHandler) PushDelta(w http.ResponseWriter, r *http.Request) {
 	if userID == "" { writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"}); return }
 
 	projectID := chi.URLParam(r, "id")
+	if !h.db.IsProjectMember(projectID, userID) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "not a member"}); return
+	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
 	var req models.PushDeltaRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"}); return
@@ -109,7 +124,11 @@ func (h *ProjectHandler) Update(w http.ResponseWriter, r *http.Request) {
 	if userID == "" { writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"}); return }
 
 	projectID := chi.URLParam(r, "id")
+	if !h.db.IsProjectOwner(projectID, userID) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "owner only"}); return
+	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
 	var req models.UpdateProjectRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"}); return
@@ -133,8 +152,10 @@ func (h *ProjectHandler) DeleteProject(w http.ResponseWriter, r *http.Request) {
 	if userID == "" { writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"}); return }
 
 	projectID := chi.URLParam(r, "id")
+	if !h.db.IsProjectOwner(projectID, userID) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "owner only"}); return
+	}
 
-	// Ideally we'd verify the user is the owner, but keeping it simple for now
 	if err := h.db.DeleteProject(projectID); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()}); return
 	}
@@ -146,18 +167,38 @@ func (h *ProjectHandler) PullDeltas(w http.ResponseWriter, r *http.Request) {
 	if userID == "" { writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"}); return }
 
 	projectID := chi.URLParam(r, "id")
+	if !h.db.IsProjectMember(projectID, userID) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "not a member"}); return
+	}
+
 	sinceStr := r.URL.Query().Get("since")
 
 	var since time.Time
 	if sinceStr != "" {
-		since, _ = time.Parse(time.RFC3339, sinceStr)
+		parsed, err := time.Parse(time.RFC3339, sinceStr)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid 'since' timestamp, expected RFC3339"}); return
+		}
+		since = parsed
 	}
 
 	deltas, err := h.db.GetDeltas(projectID, since)
 	if err != nil { writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()}); return }
 	if deltas == nil { deltas = []models.ProjectDelta{} }
 
-	writeJSON(w, http.StatusOK, deltas)
+	sanitized := make([]models.ProjectDelta, len(deltas))
+	for i, d := range deltas {
+		sanitized[i] = d
+		sanitized[i].Author = models.PublicUser{
+			ID:     d.Author.ID,
+			Name:   d.Author.Name,
+			Status: d.Author.Status,
+		}
+		sanitized[i].Author.Email = ""
+		sanitized[i].Author.Bio = ""
+	}
+
+	writeJSON(w, http.StatusOK, sanitized)
 }
 
 func (h *ProjectHandler) CreateTask(w http.ResponseWriter, r *http.Request) {
@@ -165,7 +206,11 @@ func (h *ProjectHandler) CreateTask(w http.ResponseWriter, r *http.Request) {
 	if userID == "" { writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"}); return }
 
 	projectID := chi.URLParam(r, "id")
+	if !h.db.IsProjectMember(projectID, userID) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "not a member"}); return
+	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
 	var req models.CreateTaskRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"}); return
@@ -184,6 +229,10 @@ func (h *ProjectHandler) ListTasks(w http.ResponseWriter, r *http.Request) {
 	if userID == "" { writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"}); return }
 
 	projectID := chi.URLParam(r, "id")
+	if !h.db.IsProjectMember(projectID, userID) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "not a member"}); return
+	}
+
 	tasks, err := h.db.GetTasks(projectID)
 	if err != nil { writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()}); return }
 	if tasks == nil { tasks = []models.Task{} }
@@ -196,12 +245,15 @@ func (h *ProjectHandler) CompleteTask(w http.ResponseWriter, r *http.Request) {
 	if userID == "" { writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"}); return }
 
 	projectID := chi.URLParam(r, "id")
+	if !h.db.IsProjectMember(projectID, userID) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "not a member"}); return
+	}
+
 	taskID := chi.URLParam(r, "taskId")
 
 	task, err := h.db.CompleteTask(projectID, taskID)
 	if err != nil { writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()}); return }
 
-	// Log activity for the assignee
 	h.db.LogActivity(task.AssigneeID, projectID, "task_completed")
 
 	writeJSON(w, http.StatusOK, task)
@@ -212,6 +264,10 @@ func (h *ProjectHandler) DeleteTask(w http.ResponseWriter, r *http.Request) {
 	if userID == "" { writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"}); return }
 
 	projectID := chi.URLParam(r, "id")
+	if !h.db.IsProjectMember(projectID, userID) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "not a member"}); return
+	}
+
 	taskID := chi.URLParam(r, "taskId")
 
 	if err := h.db.DeleteTask(projectID, taskID); err != nil {
@@ -225,6 +281,10 @@ func (h *ProjectHandler) Leaderboard(w http.ResponseWriter, r *http.Request) {
 	if userID == "" { writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"}); return }
 
 	projectID := chi.URLParam(r, "id")
+	if !h.db.IsProjectMember(projectID, userID) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "not a member"}); return
+	}
+
 	leaderboard, err := h.db.GetLeaderboard(projectID)
 	if err != nil { writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()}); return }
 	if leaderboard == nil { leaderboard = []models.LeaderboardEntry{} }
@@ -237,7 +297,11 @@ func (h *ProjectHandler) UpdateMemberPath(w http.ResponseWriter, r *http.Request
 	if userID == "" { writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"}); return }
 
 	projectID := chi.URLParam(r, "id")
+	if !h.db.IsProjectMember(projectID, userID) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "not a member"}); return
+	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
 	var req struct {
 		Path string `json:"path"`
 	}
@@ -257,7 +321,11 @@ func (h *ProjectHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 	if userID == "" { writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"}); return }
 
 	projectID := chi.URLParam(r, "id")
+	if !h.db.IsProjectMember(projectID, userID) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "not a member"}); return
+	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
 	var req struct {
 		Text string `json:"text"`
 	}
@@ -281,6 +349,10 @@ func (h *ProjectHandler) ListMessages(w http.ResponseWriter, r *http.Request) {
 	if userID == "" { writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"}); return }
 
 	projectID := chi.URLParam(r, "id")
+	if !h.db.IsProjectMember(projectID, userID) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "not a member"}); return
+	}
+
 	msgs, err := h.db.GetMessages(projectID)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()}); return
