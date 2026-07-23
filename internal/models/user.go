@@ -12,6 +12,7 @@ type User struct {
 	Activity             string    `json:"activity,omitempty"`
 	AvatarURL            string    `json:"avatarUrl,omitempty"`
 	PublicKeyFingerprint string    `json:"publicKeyFingerprint,omitempty"`
+	LastSeen             time.Time `json:"-"`
 	CreatedAt            time.Time `json:"createdAt"`
 	UpdatedAt            time.Time `json:"updatedAt"`
 }

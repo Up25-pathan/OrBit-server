@@ -572,7 +572,24 @@ func (db *DB) UpdatePresence(userID, activity string) error {
 	u := db.data.Users[userID]
 	if u == nil { return fmt.Errorf("user not found") }
 	u.Activity = activity
+	u.Status = "online"
+	u.LastSeen = time.Now().UTC()
 	return db.save()
+}
+
+// HeartbeatSweep marks all users offline, then each active client's
+// periodic presence call brings them back online.
+func (db *DB) HeartbeatSweep() {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	cutoff := time.Now().UTC().Add(-90 * time.Second)
+	for _, u := range db.data.Users {
+		if u.LastSeen.IsZero() || u.LastSeen.Before(cutoff) {
+			u.Status = "offline"
+		}
+	}
+	_ = db.save()
 }
 
 func (db *DB) GetPulse(userID string) ([]models.PulseEntry, error) {

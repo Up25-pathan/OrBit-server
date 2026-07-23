@@ -15,8 +15,8 @@ func (db *DB) SaveSignal(projectID, fromPeer, toPeer, signalType, payload string
 		CreatedAt: time.Now().UTC(),
 	}
 
-	// Sweep abandoned signals older than 5 minutes to prevent memory leaks
-	cutoff := time.Now().UTC().Add(-5 * time.Minute)
+	// Sweep abandoned signals older than 30 minutes to prevent memory leaks
+	cutoff := time.Now().UTC().Add(-30 * time.Minute)
 	var kept []Signal
 	for _, s := range db.data.Signals {
 		if s.CreatedAt.IsZero() || s.CreatedAt.After(cutoff) {

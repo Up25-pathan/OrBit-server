@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
@@ -27,6 +28,14 @@ func main() {
 	// Encrypted Cloud Relay: Start background sweeper to purge expired delta blobs (7-day TTL)
 	db.StartDeltaSweeper()
 
+	// Presence Heartbeat: Mark users offline after 90s of inactivity
+	go func() {
+		ticker := time.NewTicker(60 * time.Second)
+		for range ticker.C {
+			db.HeartbeatSweep()
+		}
+	}()
+
 	// License Authentication: Use MockValidator for development.
 	// To switch to the real website API later, replace MockValidator with WebsiteValidator here.
 	// No client code changes required.
@@ -44,6 +53,12 @@ func main() {
 	r.Use(corsMiddleware)
 
 	r.Route("/api/v1", func(r chi.Router) {
+		// Health check — used by keep-alive ping to prevent Render free tier spin-down
+		r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte("ok"))
+		})
+
 		// License Key Authentication — single endpoint, no signup/signin
 		r.Post("/auth/license", authHandler.AuthenticateKey)
 
