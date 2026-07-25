@@ -177,9 +177,9 @@ func (db *DB) SearchUsers(query string, limit int) ([]models.UserSearchResult, e
 
 	var results []models.UserSearchResult
 	for _, u := range db.data.Users {
-		if contains(u.ID, pattern) || contains(u.DisplayName, pattern) || contains(u.Email, pattern) {
+		if contains(u.ID, pattern) || contains(u.DisplayName, pattern) {
 			results = append(results, models.UserSearchResult{
-				ID: u.ID, DisplayName: u.DisplayName, Email: u.Email,
+				ID: u.ID, DisplayName: u.DisplayName,
 				Bio: u.Bio, Status: u.Status, AvatarURL: u.AvatarURL,
 			})
 			if len(results) >= limit { break }
@@ -245,11 +245,7 @@ func (db *DB) SendFriendRequest(fromID, toID string) (*models.FriendRequest, err
 	defer db.mu.Unlock()
 
 	if fromID == toID { return nil, fmt.Errorf("cannot send request to yourself") }
-	if db.data.Users[fromID] == nil {
-		db.data.Users[fromID] = &models.User{
-			ID: fromID, DisplayName: "Developer", Email: fromID + "@orbit.local", CreatedAt: time.Now().UTC(),
-		}
-	}
+	if db.data.Users[fromID] == nil { return nil, fmt.Errorf("sender not found") }
 	if db.data.Users[toID] == nil { return nil, fmt.Errorf("recipient not found") }
 
 	fr := &models.FriendRequest{
@@ -265,12 +261,13 @@ func (db *DB) SendFriendRequest(fromID, toID string) (*models.FriendRequest, err
 	return fr, db.save()
 }
 
-func (db *DB) AcceptFriendRequest(requestID string) error {
+func (db *DB) AcceptFriendRequest(requestID, userID string) error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
 	for _, fr := range db.data.FriendRequests {
 		if fr.ID == requestID && fr.Status == "pending" {
+			if fr.ToID != userID { return fmt.Errorf("not authorized to accept this request") }
 			fr.Status = "accepted"
 			db.data.Friends[fr.FromID] = append(db.data.Friends[fr.FromID], fr.ToID)
 			db.data.Friends[fr.ToID] = append(db.data.Friends[fr.ToID], fr.FromID)
@@ -280,12 +277,13 @@ func (db *DB) AcceptFriendRequest(requestID string) error {
 	return fmt.Errorf("pending request not found")
 }
 
-func (db *DB) RejectFriendRequest(requestID string) error {
+func (db *DB) RejectFriendRequest(requestID, userID string) error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
 	for _, fr := range db.data.FriendRequests {
 		if fr.ID == requestID && fr.Status == "pending" {
+			if fr.ToID != userID { return fmt.Errorf("not authorized to decline this request") }
 			fr.Status = "rejected"
 			return db.save()
 		}
@@ -376,6 +374,7 @@ func (db *DB) InviteMember(projectID, userID string) error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
+	if db.data.Users[userID] == nil { return fmt.Errorf("user not found") }
 	members := db.data.ProjectMembers[projectID]
 	for _, m := range members {
 		if m.UserID == userID { return nil }
@@ -722,7 +721,6 @@ func (db *DB) SaveMessage(projectID, authorID, text string) (*models.ChatMessage
 		m.Author = models.UserSearchResult{
 			ID:          u.ID,
 			DisplayName: u.DisplayName,
-			Email:       u.Email,
 			AvatarURL:   u.AvatarURL,
 		}
 	}
@@ -730,20 +728,24 @@ func (db *DB) SaveMessage(projectID, authorID, text string) (*models.ChatMessage
 	return m, nil
 }
 
-func (db *DB) GetMessages(projectID string) ([]models.ChatMessage, error) {
+func (db *DB) GetMessages(projectID string, offset, limit int) ([]models.ChatMessage, error) {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
+	if limit <= 0 || limit > 200 { limit = 100 }
+	if offset < 0 { offset = 0 }
+
 	msgs := db.data.Messages[projectID]
 	var result []models.ChatMessage
-	for _, m := range msgs {
+	for i, m := range msgs {
+		if i < offset { continue }
+		if len(result) >= limit { break }
 		cm := *m
 		u := db.data.Users[cm.AuthorID]
 		if u != nil {
 			cm.Author = models.UserSearchResult{
 				ID:          u.ID,
 				DisplayName: u.DisplayName,
-				Email:       u.Email,
 				AvatarURL:   u.AvatarURL,
 			}
 		}
@@ -786,4 +788,44 @@ func (db *DB) DeleteProject(projectID string) error {
 	db.data.Signals = keptSignals
 
 	return db.save()
+}
+
+// MessageSweep deletes chat messages older than 30 days.
+func (db *DB) MessageSweep() {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	cutoff := time.Now().UTC().Add(-30 * 24 * time.Hour)
+	dirty := false
+	for pid, msgs := range db.data.Messages {
+		var kept []*models.ChatMessage
+		for _, m := range msgs {
+			if m.CreatedAt.After(cutoff) {
+				kept = append(kept, m)
+			}
+		}
+		if len(kept) != len(msgs) {
+			db.data.Messages[pid] = kept
+			dirty = true
+		}
+	}
+	if dirty { _ = db.save() }
+}
+
+// ActivityLogSweep prunes activity logs older than 90 days.
+func (db *DB) ActivityLogSweep() {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	cutoff := time.Now().UTC().Add(-90 * 24 * time.Hour)
+	var kept []models.ActivityLog
+	for _, l := range db.data.ActivityLogs {
+		if l.CreatedAt.After(cutoff) {
+			kept = append(kept, l)
+		}
+	}
+	if len(kept) != len(db.data.ActivityLogs) {
+		db.data.ActivityLogs = kept
+		_ = db.save()
+	}
 }

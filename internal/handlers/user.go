@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/orbit/control-server/internal/middleware"
 	"github.com/orbit/control-server/internal/models"
 	"github.com/orbit/control-server/internal/repository"
@@ -59,6 +60,18 @@ func (h *UserHandler) UpdateProfile(w http.ResponseWriter, r *http.Request) {
 
 	if req.DisplayName == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "displayName is required"})
+		return
+	}
+	if len(req.DisplayName) > 64 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "displayName must be 64 characters or less"})
+		return
+	}
+	if len(req.Bio) > 512 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bio must be 512 characters or less"})
+		return
+	}
+	if len(req.AvatarURL) > 2048 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "avatarUrl must be 2048 characters or less"})
 		return
 	}
 
@@ -140,11 +153,9 @@ func (h *UserHandler) UpdatePresence(w http.ResponseWriter, r *http.Request) {
 func (h *UserHandler) GetPulse(w http.ResponseWriter, r *http.Request) {
 	userID := middleware.GetUserID(r)
 	if userID == "" { writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"}); return }
-	// We can let any authenticated user get pulse of anyone, but for now we'll just check the target
-	// wait, let's just get the pulse for the requesting user since there is no ID param in the route right now
-	// actually, the route is /users/{id}/pulse
-	targetID := r.URL.Path[len("/api/v1/users/"):len(r.URL.Path)-len("/pulse")]
-	if targetID == "" { targetID = userID } // fallback
+
+	targetID := chi.URLParam(r, "id")
+	if targetID == "" { targetID = userID }
 
 	pulse, err := h.db.GetPulse(targetID)
 	if err != nil { writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()}); return }

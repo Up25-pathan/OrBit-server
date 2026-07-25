@@ -67,7 +67,7 @@ func (h *FriendHandler) AcceptRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.db.AcceptFriendRequest(requestID); err != nil {
+	if err := h.db.AcceptFriendRequest(requestID, userID); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
@@ -128,7 +128,7 @@ func (h *FriendHandler) DeclineRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.db.RejectFriendRequest(requestID); err != nil {
+	if err := h.db.RejectFriendRequest(requestID, userID); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}

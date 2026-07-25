@@ -3,6 +3,9 @@ package handlers
 import (
 	"encoding/json"
 	"net/http"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -102,6 +105,10 @@ func (h *ProjectHandler) PushDelta(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"}); return
 	}
 	if req.Data == "" { writeJSON(w, http.StatusBadRequest, map[string]string{"error": "data is required"}); return }
+	const maxDeltaDataSize = 10 * 1024 * 1024 // 10 MB
+	if len(req.Data) > maxDeltaDataSize {
+		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "delta data exceeds 10 MB limit"}); return
+	}
 
 	delta, err := h.db.StoreDelta(projectID, userID, req.Data)
 	if err != nil { writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()}); return }
@@ -109,14 +116,6 @@ func (h *ProjectHandler) PushDelta(w http.ResponseWriter, r *http.Request) {
 	h.db.LogActivity(userID, projectID, "delta_pushed")
 
 	writeJSON(w, http.StatusCreated, delta)
-}
-
-func (h *ProjectHandler) LogPush(w http.ResponseWriter, r *http.Request) {
-	userID := middleware.GetUserID(r)
-	if userID == "" { writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"}); return }
-	projectID := chi.URLParam(r, "id")
-	h.db.LogActivity(userID, projectID, "delta_pushed")
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 func (h *ProjectHandler) Update(w http.ResponseWriter, r *http.Request) {
@@ -273,6 +272,9 @@ func (h *ProjectHandler) DeleteTask(w http.ResponseWriter, r *http.Request) {
 	if err := h.db.DeleteTask(projectID, taskID); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()}); return
 	}
+
+	h.db.LogActivity(userID, projectID, "task_deleted")
+
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
@@ -309,7 +311,12 @@ func (h *ProjectHandler) UpdateMemberPath(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"}); return
 	}
 
-	if err := h.db.UpdateMemberPath(projectID, userID, req.Path); err != nil {
+	cleaned := filepath.Clean(req.Path)
+	if strings.Contains(cleaned, "..") || filepath.IsAbs(cleaned) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "path must be relative and contain no '..' components"}); return
+	}
+
+	if err := h.db.UpdateMemberPath(projectID, userID, cleaned); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()}); return
 	}
 
@@ -353,7 +360,12 @@ func (h *ProjectHandler) ListMessages(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "not a member"}); return
 	}
 
-	msgs, err := h.db.GetMessages(projectID)
+	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if offset < 0 { offset = 0 }
+	if limit <= 0 || limit > 200 { limit = 100 }
+
+	msgs, err := h.db.GetMessages(projectID, offset, limit)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()}); return
 	}

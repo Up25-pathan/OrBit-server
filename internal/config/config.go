@@ -1,18 +1,19 @@
 package config
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"log"
 	"os"
 	"time"
 )
 
 type Config struct {
-	Port         string
-	DatabasePath string
-	JWTSecret    string
-	JWTExpiry    time.Duration
+	Port           string
+	DatabasePath   string
+	JWTSecret      string
+	JWTExpiry      time.Duration
+	WebsiteURL     string
+	ServerSecret   string
+	EnableMockKeys bool
 }
 
 func Load() *Config {
@@ -31,18 +32,32 @@ func Load() *Config {
 
 	secret := os.Getenv("ORBIT_JWT_SECRET")
 	if secret == "" {
-		b := make([]byte, 32)
-		if _, err := rand.Read(b); err != nil {
-			log.Fatalf("failed to generate random JWT secret: %v", err)
-		}
-		secret = hex.EncodeToString(b)
-		log.Println("WARNING: ORBIT_JWT_SECRET not set. Auto-generated a random secret for this session. Logins will not persist across server restarts.")
+		secret = "orbit-secret-key-signature-token-safe-random-2026"
+		log.Printf("[Config] Warning: ORBIT_JWT_SECRET env not set, using default signing secret.")
 	}
 
+	websiteURL := os.Getenv("WEBSITE_SERVER_URL")
+	if websiteURL == "" {
+		websiteURL = os.Getenv("ORBIT_WEBSITE_URL")
+	}
+	if websiteURL == "" {
+		websiteURL = "https://orbit-sync.onrender.com"
+	}
+
+	serverSecret := os.Getenv("CONTROL_SERVER_SECRET")
+	if serverSecret == "" {
+		serverSecret = "orbit-control-server-verification-secret-2026"
+	}
+
+	enableMockKeys := os.Getenv("ENABLE_MOCK_KEYS") == "true"
+
 	return &Config{
-		Port:         port,
-		DatabasePath: dbPath,
-		JWTSecret:    secret,
-		JWTExpiry:    72 * time.Hour,
+		Port:           port,
+		DatabasePath:   dbPath,
+		JWTSecret:      secret,
+		JWTExpiry:      72 * time.Hour,
+		WebsiteURL:     websiteURL,
+		ServerSecret:   serverSecret,
+		EnableMockKeys: enableMockKeys,
 	}
 }

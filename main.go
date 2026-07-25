@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -36,10 +37,18 @@ func main() {
 		}
 	}()
 
-	// License Authentication: Use MockValidator for development.
-	// To switch to the real website API later, replace MockValidator with WebsiteValidator here.
-	// No client code changes required.
-	validator := &license.MockValidator{}
+	// Message & Activity Log Sweepers: Clean up old data periodically
+	go func() {
+		ticker := time.NewTicker(1 * time.Hour)
+		for range ticker.C {
+			db.MessageSweep()
+			db.ActivityLogSweep()
+		}
+	}()
+
+	// License Authentication: Connected live to Website Server verification authority
+	validator := license.NewWebsiteValidator(cfg.WebsiteURL, cfg.ServerSecret, cfg.EnableMockKeys)
+	log.Printf("[License Authority] Verifying licenses against Website Server at %s (Mock Keys: %v)", cfg.WebsiteURL, cfg.EnableMockKeys)
 
 	authHandler := handlers.NewAuthHandler(db, validator, cfg.JWTSecret, cfg.JWTExpiry)
 	userHandler := handlers.NewUserHandler(db)
@@ -51,6 +60,7 @@ func main() {
 	r.Use(chimw.Logger)
 	r.Use(chimw.Recoverer)
 	r.Use(corsMiddleware)
+	r.Use(middleware.RateLimit)
 
 	r.Route("/api/v1", func(r chi.Router) {
 		// Health check — used by keep-alive ping to prevent Render free tier spin-down
@@ -80,7 +90,8 @@ func main() {
 					http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
 					return
 				}
-				writeJSON(w, http.StatusOK, user)
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(user)
 			})
 
 			r.Post("/friends/request", friendHandler.SendRequest)
@@ -122,11 +133,30 @@ func main() {
 	}
 }
 
+var allowedOrigins = map[string]bool{
+	"tauri://localhost":                true,
+	"https://tauri.localhost":          true,
+	"http://localhost":                 true,
+	"https://orbit-sync.onrender.com":  true,
+	"https://orbit-server-kae6.onrender.com": true,
+}
+
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
-		if origin == "" {
-			origin = "*"
+		allowed := false
+		if origin != "" {
+			// Check exact match
+			if allowedOrigins[origin] {
+				allowed = true
+			}
+			// Check localhost with any port (for development)
+			if !allowed && strings.HasPrefix(origin, "http://localhost:") {
+				allowed = true
+			}
+		}
+		if !allowed {
+			origin = "tauri://localhost"
 		}
 		w.Header().Set("Access-Control-Allow-Origin", origin)
 		w.Header().Set("Vary", "Origin")
@@ -139,10 +169,4 @@ func corsMiddleware(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
-}
-
-func writeJSON(w http.ResponseWriter, status int, data any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(data)
 }
