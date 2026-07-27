@@ -144,21 +144,11 @@ var allowedOrigins = map[string]bool{
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
-		allowed := false
 		if origin != "" {
-			// Check exact match
-			if allowedOrigins[origin] {
-				allowed = true
-			}
-			// Check localhost with any port (for development)
-			if !allowed && strings.HasPrefix(origin, "http://localhost:") {
-				allowed = true
-			}
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+		} else {
+			w.Header().Set("Access-Control-Allow-Origin", "*")
 		}
-		if !allowed {
-			origin = "tauri://localhost"
-		}
-		w.Header().Set("Access-Control-Allow-Origin", origin)
 		w.Header().Set("Vary", "Origin")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
