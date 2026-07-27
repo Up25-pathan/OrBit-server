@@ -67,7 +67,7 @@ var mockKeys = map[string]*LicenseInfo{
 	},
 }
 
-// Validate checks the provided key against the mock database or parses valid ORBIT keys dynamically.
+// Validate checks the provided key against the registered mock database.
 func (m *MockValidator) Validate(key string) (*LicenseInfo, error) {
 	cleanKey := strings.ToUpper(strings.TrimSpace(key))
 	if cleanKey == "" {
@@ -79,27 +79,5 @@ func (m *MockValidator) Validate(key string) (*LicenseInfo, error) {
 		return &result, nil
 	}
 
-	// Dynamic fallback for any valid ORBIT license key structure in dev/test mode
-	if strings.HasPrefix(cleanKey, "ORBIT-") || strings.HasPrefix(cleanKey, "ORBIT_") {
-		tier := "free"
-		if strings.Contains(cleanKey, "PRO") {
-			tier = "pro"
-		} else if strings.Contains(cleanKey, "ENTERPRISE") {
-			tier = "enterprise"
-		}
-
-		keyHash := "dev"
-		if len(cleanKey) >= 6 {
-			keyHash = cleanKey[len(cleanKey)-6:]
-		}
-
-		return &LicenseInfo{
-			UserID:   fmt.Sprintf("usr_%s_%s", tier, strings.ToLower(keyHash)),
-			Name:     fmt.Sprintf("OrBit %s User", strings.Title(tier)),
-			Email:    fmt.Sprintf("user_%s@orbit.dev", strings.ToLower(keyHash)),
-			PlanTier: tier,
-		}, nil
-	}
-
-	return nil, fmt.Errorf("invalid license key")
+	return nil, fmt.Errorf("key not in mock map")
 }
