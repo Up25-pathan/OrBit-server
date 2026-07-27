@@ -136,18 +136,26 @@ func main() {
 var allowedOrigins = map[string]bool{
 	"tauri://localhost":                true,
 	"https://tauri.localhost":          true,
-	"http://localhost":                 true,
 	"https://orbit-sync.onrender.com":  true,
 	"https://orbit-server-kae6.onrender.com": true,
+}
+
+func isAllowedOrigin(origin string) bool {
+	if allowedOrigins[origin] { return true }
+	// Allow any localhost port for dev (http://localhost:1420, etc.)
+	if strings.HasPrefix(origin, "http://localhost") || strings.HasPrefix(origin, "http://127.0.0.1") { return true }
+	return false
 }
 
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
-		if origin != "" {
+		if origin != "" && isAllowedOrigin(origin) {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
-		} else {
-			w.Header().Set("Access-Control-Allow-Origin", "*")
+		} else if origin != "" {
+			// Origin present but not allowed — reject
+			http.Error(w, `{"error":"origin not allowed"}`, http.StatusForbidden)
+			return
 		}
 		w.Header().Set("Vary", "Origin")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
