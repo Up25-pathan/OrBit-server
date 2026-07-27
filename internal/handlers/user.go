@@ -86,10 +86,6 @@ func (h *UserHandler) UpdateProfile(w http.ResponseWriter, r *http.Request) {
 
 func (h *UserHandler) SearchUsers(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query().Get("q")
-	if query == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "query parameter 'q' is required"})
-		return
-	}
 
 	users, err := h.db.SearchUsers(query, 20)
 	if err != nil {

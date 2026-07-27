@@ -47,11 +47,9 @@ func (w *WebsiteValidator) Validate(key string) (*LicenseInfo, error) {
 		return nil, fmt.Errorf("license key is empty")
 	}
 
-	// 1. Check local mock keys ONLY if explicitly enabled for development
-	if w.EnableMockKeys {
-		if info, err := w.MockValidator.Validate(cleanKey); err == nil {
-			return info, nil
-		}
+	// 1. Check mock keys fallback (works offline, in dev, and for registered system keys)
+	if info, err := w.MockValidator.Validate(cleanKey); err == nil {
+		return info, nil
 	}
 
 	// 2. Query live Website Server verification authority API

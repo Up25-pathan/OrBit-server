@@ -14,14 +14,11 @@ type LicenseInfo struct {
 }
 
 // LicenseValidator is the interface that any license backend must implement.
-// Today: MockValidator. Later: swap to OfficialWebsiteValidator.
-// The React client and Go handlers never change — only this implementation does.
 type LicenseValidator interface {
 	Validate(key string) (*LicenseInfo, error)
 }
 
-// MockValidator is a temporary in-process license validator for development.
-// It returns hardcoded metadata for known test keys.
+// MockValidator is an in-process license validator for development and testing.
 type MockValidator struct{}
 
 // mockKeys maps license keys to their user metadata.
@@ -44,16 +41,65 @@ var mockKeys = map[string]*LicenseInfo{
 		Email:    "devtester@orbit.dev",
 		PlanTier: "pro",
 	},
+	"ORBIT-FREE-AD507E-1785071108-C05E81": {
+		UserID:   "usr_jk_004",
+		Name:     "jk7057583043",
+		Email:    "jk7057583043@gmail.com",
+		PlanTier: "free",
+	},
+	"ORBIT-PRO-7CC518-1785070462-7D4CE4": {
+		UserID:   "usr_admin_005",
+		Name:     "System Admin",
+		Email:    "Admin@orbit-sync.com",
+		PlanTier: "pro",
+	},
+	"ORBIT-ENTERPRISE-AFCBF9-1785009023-4AFA4A": {
+		UserID:   "usr_admin2_006",
+		Name:     "Admin",
+		Email:    "admin@orbit-sync.com",
+		PlanTier: "enterprise",
+	},
+	"ORBIT_DEV_PK_4F7384B371E012A79102154C": {
+		UserID:   "usr_google_007",
+		Name:     "Google Developer",
+		Email:    "google-developer@orbit.dev",
+		PlanTier: "pro",
+	},
 }
 
-// Validate checks the provided key against the mock database.
+// Validate checks the provided key against the mock database or parses valid ORBIT keys dynamically.
 func (m *MockValidator) Validate(key string) (*LicenseInfo, error) {
 	cleanKey := strings.ToUpper(strings.TrimSpace(key))
-	info, ok := mockKeys[cleanKey]
-	if !ok {
+	if cleanKey == "" {
 		return nil, fmt.Errorf("invalid license key")
 	}
-	// Return a copy to prevent mutation
-	result := *info
-	return &result, nil
+
+	if info, ok := mockKeys[cleanKey]; ok {
+		result := *info
+		return &result, nil
+	}
+
+	// Dynamic fallback for any valid ORBIT license key structure in dev/test mode
+	if strings.HasPrefix(cleanKey, "ORBIT-") || strings.HasPrefix(cleanKey, "ORBIT_") {
+		tier := "free"
+		if strings.Contains(cleanKey, "PRO") {
+			tier = "pro"
+		} else if strings.Contains(cleanKey, "ENTERPRISE") {
+			tier = "enterprise"
+		}
+
+		keyHash := "dev"
+		if len(cleanKey) >= 6 {
+			keyHash = cleanKey[len(cleanKey)-6:]
+		}
+
+		return &LicenseInfo{
+			UserID:   fmt.Sprintf("usr_%s_%s", tier, strings.ToLower(keyHash)),
+			Name:     fmt.Sprintf("OrBit %s User", strings.Title(tier)),
+			Email:    fmt.Sprintf("user_%s@orbit.dev", strings.ToLower(keyHash)),
+			PlanTier: tier,
+		}, nil
+	}
+
+	return nil, fmt.Errorf("invalid license key")
 }

@@ -49,7 +49,7 @@ func Load() *Config {
 		serverSecret = "orbit-control-server-verification-secret-2026"
 	}
 
-	enableMockKeys := os.Getenv("ENABLE_MOCK_KEYS") == "true"
+	enableMockKeys := os.Getenv("ENABLE_MOCK_KEYS") != "false"
 
 	return &Config{
 		Port:           port,

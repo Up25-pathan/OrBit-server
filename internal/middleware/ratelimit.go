@@ -70,9 +70,13 @@ func RateLimit(next http.Handler) http.Handler {
 		ip := getIP(r)
 		path := r.URL.Path
 
-		// Auth endpoints: stricter limit
+		// Local loopback connections (development & desktop app polling): bypass rate limiter
+		if ip == "127.0.0.1" || ip == "::1" || ip == "localhost" {
+			next.ServeHTTP(w, r)
+			return
+		}
 		if strings.HasSuffix(path, "/auth/license") {
-			if !limiter.allow("auth:"+ip, 10, time.Minute) {
+			if !limiter.allow("auth:"+ip, 100, time.Minute) {
 				http.Error(w, `{"error":"rate limit exceeded"}`, http.StatusTooManyRequests)
 				return
 			}
@@ -80,10 +84,10 @@ func RateLimit(next http.Handler) http.Handler {
 			return
 		}
 
-		// Write endpoints (POST/PUT/DELETE): moderate limit
+		// Write endpoints (POST/PUT/DELETE): high capacity
 		method := r.Method
 		if method == "POST" || method == "PUT" || method == "DELETE" {
-			if !limiter.allow("write:"+ip, 30, time.Minute) {
+			if !limiter.allow("write:"+ip, 300, time.Minute) {
 				http.Error(w, `{"error":"rate limit exceeded"}`, http.StatusTooManyRequests)
 				return
 			}
@@ -91,8 +95,8 @@ func RateLimit(next http.Handler) http.Handler {
 			return
 		}
 
-		// Read endpoints: generous limit
-		if !limiter.allow("read:"+ip, 60, time.Minute) {
+		// Read endpoints: high capacity for live polling and search
+		if !limiter.allow("read:"+ip, 1200, time.Minute) {
 			http.Error(w, `{"error":"rate limit exceeded"}`, http.StatusTooManyRequests)
 			return
 		}

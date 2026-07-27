@@ -177,10 +177,11 @@ func (db *DB) SearchUsers(query string, limit int) ([]models.UserSearchResult, e
 
 	var results []models.UserSearchResult
 	for _, u := range db.data.Users {
-		if contains(u.ID, pattern) || contains(u.DisplayName, pattern) {
+		if pattern == "" || contains(u.ID, pattern) || contains(u.DisplayName, pattern) || contains(u.Email, pattern) {
 			results = append(results, models.UserSearchResult{
-				ID: u.ID, DisplayName: u.DisplayName,
+				ID: u.ID, DisplayName: u.DisplayName, Email: u.Email,
 				Bio: u.Bio, Status: u.Status, AvatarURL: u.AvatarURL,
+				PublicKeyFingerprint: u.PublicKeyFingerprint,
 			})
 			if len(results) >= limit { break }
 		}
@@ -261,6 +262,13 @@ func (db *DB) SendFriendRequest(fromID, toID string) (*models.FriendRequest, err
 	return fr, db.save()
 }
 
+func sliceContains(slice []string, val string) bool {
+	for _, item := range slice {
+		if item == val { return true }
+	}
+	return false
+}
+
 func (db *DB) AcceptFriendRequest(requestID, userID string) error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
@@ -269,8 +277,12 @@ func (db *DB) AcceptFriendRequest(requestID, userID string) error {
 		if fr.ID == requestID && fr.Status == "pending" {
 			if fr.ToID != userID { return fmt.Errorf("not authorized to accept this request") }
 			fr.Status = "accepted"
-			db.data.Friends[fr.FromID] = append(db.data.Friends[fr.FromID], fr.ToID)
-			db.data.Friends[fr.ToID] = append(db.data.Friends[fr.ToID], fr.FromID)
+			if !sliceContains(db.data.Friends[fr.FromID], fr.ToID) {
+				db.data.Friends[fr.FromID] = append(db.data.Friends[fr.FromID], fr.ToID)
+			}
+			if !sliceContains(db.data.Friends[fr.ToID], fr.FromID) {
+				db.data.Friends[fr.ToID] = append(db.data.Friends[fr.ToID], fr.FromID)
+			}
 			return db.save()
 		}
 	}
@@ -316,8 +328,11 @@ func (db *DB) GetFriends(userID string) ([]models.Friend, error) {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
+	seen := make(map[string]bool)
 	var friends []models.Friend
 	for _, friendID := range db.data.Friends[userID] {
+		if seen[friendID] { continue }
+		seen[friendID] = true
 		u := db.data.Users[friendID]
 		if u == nil { continue }
 		friends = append(friends, models.Friend{
