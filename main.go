@@ -69,6 +69,12 @@ func main() {
 			w.Write([]byte("ok"))
 		})
 
+		// Audit Fix #42: Add updater endpoint handler returning current version info
+		r.Get("/updater/latest.json", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"version":"0.1.0","notes":"No updates available currently.","pub_date":"2026-07-27T00:00:00Z","platforms":{"windows-x86_64":{"signature":"","url":""},"darwin-x86_64":{"signature":"","url":""},"darwin-aarch64":{"signature":"","url":""},"linux-x86_64":{"signature":"","url":""}}}`))
+		})
+
 		// License Key Authentication — single endpoint, no signup/signin
 		r.Post("/auth/license", authHandler.AuthenticateKey)
 
@@ -106,6 +112,8 @@ func main() {
 			r.Put("/projects/{id}", projectHandler.Update)
 			r.Delete("/projects/{id}", projectHandler.DeleteProject)
 			r.Post("/projects/{id}/invite", projectHandler.Invite)
+			r.Get("/projects/{id}/token", projectHandler.GenerateToken)
+			r.Post("/projects/join", projectHandler.JoinByToken)
 			r.Put("/projects/{id}/path", projectHandler.UpdateMemberPath)
 			r.Post("/projects/{id}/messages", projectHandler.SendMessage)
 			r.Get("/projects/{id}/messages", projectHandler.ListMessages)
@@ -135,15 +143,19 @@ func main() {
 
 var allowedOrigins = map[string]bool{
 	"tauri://localhost":                true,
+	"http://tauri.localhost":           true,
 	"https://tauri.localhost":          true,
+	"asset://localhost":                true,
 	"https://orbit-sync.onrender.com":  true,
 	"https://orbit-server-kae6.onrender.com": true,
+	"https://orbit.dev":                true,
 }
 
 func isAllowedOrigin(origin string) bool {
 	if allowedOrigins[origin] { return true }
-	// Allow any localhost port for dev (http://localhost:1420, etc.)
-	if strings.HasPrefix(origin, "http://localhost") || strings.HasPrefix(origin, "http://127.0.0.1") { return true }
+	// Audit Fix #17: Allow any localhost/127.0.0.1 port for local dev & orbit-web
+	if strings.HasPrefix(origin, "http://localhost") || strings.HasPrefix(origin, "http://127.0.0.1") || strings.HasPrefix(origin, "https://localhost") { return true }
+	if strings.HasSuffix(origin, ".onrender.com") || strings.HasSuffix(origin, ".vercel.app") { return true }
 	return false
 }
 

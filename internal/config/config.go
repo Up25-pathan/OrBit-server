@@ -1,6 +1,8 @@
 package config
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"log"
 	"os"
 	"time"
@@ -32,8 +34,12 @@ func Load() *Config {
 
 	secret := os.Getenv("ORBIT_JWT_SECRET")
 	if secret == "" {
-		secret = "orbit-secret-key-signature-token-safe-random-2026"
-		log.Printf("[Config] Warning: ORBIT_JWT_SECRET env not set, using default signing secret.")
+		// Audit Fix #7: Generate a random JWT secret instead of using a hardcoded default.
+		// This secret won't persist across restarts unless the env var is set.
+		randomBytes := make([]byte, 32)
+		_, _ = rand.Read(randomBytes)
+		secret = hex.EncodeToString(randomBytes)
+		log.Printf("[Config] WARNING: ORBIT_JWT_SECRET env not set. Generated ephemeral secret. Set ORBIT_JWT_SECRET for persistent sessions.")
 	}
 
 	websiteURL := os.Getenv("WEBSITE_SERVER_URL")
@@ -46,10 +52,16 @@ func Load() *Config {
 
 	serverSecret := os.Getenv("CONTROL_SERVER_SECRET")
 	if serverSecret == "" {
-		serverSecret = "orbit-control-server-verification-secret-2026"
+		// Audit Fix #7: Generate an ephemeral secret instead of hardcoded default
+		randomBytes := make([]byte, 16)
+		_, _ = rand.Read(randomBytes)
+		serverSecret = "ephemeral-" + hex.EncodeToString(randomBytes)
+		log.Printf("[Config] WARNING: CONTROL_SERVER_SECRET env not set. Generated ephemeral secret.")
 	}
 
-	enableMockKeys := os.Getenv("ENABLE_MOCK_KEYS") != "false"
+	// Audit Fix #27: Mock keys disabled by default in production.
+	// Set ENABLE_MOCK_KEYS=true explicitly during development.
+	enableMockKeys := os.Getenv("ENABLE_MOCK_KEYS") == "true"
 
 	return &Config{
 		Port:           port,

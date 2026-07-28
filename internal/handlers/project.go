@@ -1,7 +1,9 @@
 package handlers
 
 import (
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"path/filepath"
 	"strconv"
@@ -88,6 +90,54 @@ func (h *ProjectHandler) Invite(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "invited"})
+}
+
+// Audit Fix #40: Invite token system — generates deterministic verifiable token
+func (h *ProjectHandler) GenerateToken(w http.ResponseWriter, r *http.Request) {
+	userID := middleware.GetUserID(r)
+	if userID == "" { writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"}); return }
+
+	projectID := chi.URLParam(r, "id")
+	if !h.db.IsProjectMember(projectID, userID) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "not a member"}); return
+	}
+
+	hash := sha256.Sum256([]byte(projectID + "_orbit_secret_salt"))
+	token := fmt.Sprintf("orbit_inv_%x_%s", hash[:8], projectID)
+	writeJSON(w, http.StatusOK, map[string]string{"token": token})
+}
+
+type JoinTokenRequest struct {
+	Token string `json:"token"`
+}
+
+func (h *ProjectHandler) JoinByToken(w http.ResponseWriter, r *http.Request) {
+	userID := middleware.GetUserID(r)
+	if userID == "" { writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"}); return }
+
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
+	var req JoinTokenRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"}); return
+	}
+
+	parts := strings.Split(req.Token, "_")
+	if len(parts) < 4 || !strings.HasPrefix(req.Token, "orbit_inv_") {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid invite token"}); return
+	}
+
+	projectID := strings.Join(parts[3:], "_")
+	expectedHash := sha256.Sum256([]byte(projectID + "_orbit_secret_salt"))
+	expectedPrefix := fmt.Sprintf("%x", expectedHash[:8])
+	if parts[2] != expectedPrefix {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "invite token signature verification failed"}); return
+	}
+
+	if err := h.db.InviteMember(projectID, userID); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()}); return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "joined", "projectId": projectID})
 }
 
 func (h *ProjectHandler) PushDelta(w http.ResponseWriter, r *http.Request) {
