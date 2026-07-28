@@ -11,11 +11,9 @@ import (
 
 // WebsiteValidator connects to the Website Server verification authority (GET /api/v1/licenses/verify?key=...)
 type WebsiteValidator struct {
-	WebsiteURL     string
-	ServerSecret   string
-	EnableMockKeys bool
-	Client         *http.Client
-	MockValidator  *MockValidator
+	WebsiteURL   string
+	ServerSecret string
+	Client       *http.Client
 }
 
 type webVerifyResponse struct {
@@ -28,16 +26,14 @@ type webVerifyResponse struct {
 	Error       string `json:"error"`
 }
 
-func NewWebsiteValidator(websiteURL string, serverSecret string, enableMockKeys bool) *WebsiteValidator {
+func NewWebsiteValidator(websiteURL string, serverSecret string) *WebsiteValidator {
 	if websiteURL == "" {
 		websiteURL = "https://orbit-sync.onrender.com"
 	}
 	return &WebsiteValidator{
-		WebsiteURL:     strings.TrimRight(websiteURL, "/"),
-		ServerSecret:   serverSecret,
-		EnableMockKeys: enableMockKeys,
-		Client:         &http.Client{Timeout: 10 * time.Second},
-		MockValidator:  &MockValidator{},
+		WebsiteURL:   strings.TrimRight(websiteURL, "/"),
+		ServerSecret: serverSecret,
+		Client:       &http.Client{Timeout: 10 * time.Second},
 	}
 }
 
@@ -45,11 +41,6 @@ func (w *WebsiteValidator) Validate(key string) (*LicenseInfo, error) {
 	cleanKey := strings.TrimSpace(key)
 	if cleanKey == "" {
 		return nil, fmt.Errorf("license key is empty")
-	}
-
-	// 1. Check mock keys fallback (works offline, in dev, and for registered system keys)
-	if info, err := w.MockValidator.Validate(cleanKey); err == nil {
-		return info, nil
 	}
 
 	// 2. Query live Website Server verification authority API

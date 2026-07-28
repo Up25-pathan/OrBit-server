@@ -46,9 +46,9 @@ func main() {
 		}
 	}()
 
-	// License Authentication: Connected live to Website Server verification authority
-	validator := license.NewWebsiteValidator(cfg.WebsiteURL, cfg.ServerSecret, cfg.EnableMockKeys)
-	log.Printf("[License Authority] Verifying licenses against Website Server at %s (Mock Keys: %v)", cfg.WebsiteURL, cfg.EnableMockKeys)
+	// Initialize License Validator
+	validator := license.NewWebsiteValidator(cfg.WebsiteURL, cfg.ServerSecret)
+	log.Printf("[License Authority] Verifying licenses against Website Server at %s", cfg.WebsiteURL)
 
 	authHandler := handlers.NewAuthHandler(db, validator, cfg.JWTSecret, cfg.JWTExpiry)
 	userHandler := handlers.NewUserHandler(db)
@@ -142,20 +142,26 @@ func main() {
 }
 
 var allowedOrigins = map[string]bool{
-	"tauri://localhost":                true,
-	"http://tauri.localhost":           true,
-	"https://tauri.localhost":          true,
-	"asset://localhost":                true,
-	"https://orbit-sync.onrender.com":  true,
+	"tauri://localhost":                      true,
+	"http://tauri.localhost":                 true,
+	"https://tauri.localhost":                true,
+	"asset://localhost":                      true,
+	"https://orbit-sync.onrender.com":        true,
 	"https://orbit-server-kae6.onrender.com": true,
-	"https://orbit.dev":                true,
+	"https://orbit.dev":                      true,
 }
 
 func isAllowedOrigin(origin string) bool {
-	if allowedOrigins[origin] { return true }
+	if allowedOrigins[origin] {
+		return true
+	}
 	// Audit Fix #17: Allow any localhost/127.0.0.1 port for local dev & orbit-web
-	if strings.HasPrefix(origin, "http://localhost") || strings.HasPrefix(origin, "http://127.0.0.1") || strings.HasPrefix(origin, "https://localhost") { return true }
-	if strings.HasSuffix(origin, ".onrender.com") || strings.HasSuffix(origin, ".vercel.app") { return true }
+	if strings.HasPrefix(origin, "http://localhost") || strings.HasPrefix(origin, "http://127.0.0.1") || strings.HasPrefix(origin, "https://localhost") {
+		return true
+	}
+	if strings.HasSuffix(origin, ".onrender.com") || strings.HasSuffix(origin, ".vercel.app") {
+		return true
+	}
 	return false
 }
 

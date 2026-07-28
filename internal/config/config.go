@@ -59,10 +59,6 @@ func Load() *Config {
 		log.Printf("[Config] WARNING: CONTROL_SERVER_SECRET env not set. Generated ephemeral secret.")
 	}
 
-	// Audit Fix #27: Mock keys disabled by default in production.
-	// Set ENABLE_MOCK_KEYS=true explicitly during development.
-	enableMockKeys := os.Getenv("ENABLE_MOCK_KEYS") == "true"
-
 	return &Config{
 		Port:           port,
 		DatabasePath:   dbPath,
@@ -70,6 +66,5 @@ func Load() *Config {
 		JWTExpiry:      72 * time.Hour,
 		WebsiteURL:     websiteURL,
 		ServerSecret:   serverSecret,
-		EnableMockKeys: enableMockKeys,
 	}
 }
