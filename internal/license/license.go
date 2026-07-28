@@ -1,10 +1,5 @@
 package license
 
-import (
-	"fmt"
-	"strings"
-)
-
 // LicenseInfo holds validated user metadata from the license authority.
 type LicenseInfo struct {
 	UserID   string `json:"userId"`
