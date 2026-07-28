@@ -52,11 +52,8 @@ func Load() *Config {
 
 	serverSecret := os.Getenv("CONTROL_SERVER_SECRET")
 	if serverSecret == "" {
-		// Audit Fix #7: Generate an ephemeral secret instead of hardcoded default
-		randomBytes := make([]byte, 16)
-		_, _ = rand.Read(randomBytes)
-		serverSecret = "ephemeral-" + hex.EncodeToString(randomBytes)
-		log.Printf("[Config] WARNING: CONTROL_SERVER_SECRET env not set. Generated ephemeral secret.")
+		serverSecret = "orbit-control-server-verification-secret-2026"
+		log.Printf("[Config] WARNING: CONTROL_SERVER_SECRET env not set. Using default secret.")
 	}
 
 	return &Config{
