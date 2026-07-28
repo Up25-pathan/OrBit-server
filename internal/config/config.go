@@ -16,6 +16,7 @@ type Config struct {
 	WebsiteURL     string
 	ServerSecret   string
 	EnableMockKeys bool
+	InviteSalt     string
 }
 
 func Load() *Config {
@@ -37,7 +38,9 @@ func Load() *Config {
 		// Audit Fix #7: Generate a random JWT secret instead of using a hardcoded default.
 		// This secret won't persist across restarts unless the env var is set.
 		randomBytes := make([]byte, 32)
-		_, _ = rand.Read(randomBytes)
+		if _, err := rand.Read(randomBytes); err != nil {
+			log.Fatalf("[Config] Failed to generate random JWT secret: %v", err)
+		}
 		secret = hex.EncodeToString(randomBytes)
 		log.Printf("[Config] WARNING: ORBIT_JWT_SECRET env not set. Generated ephemeral secret. Set ORBIT_JWT_SECRET for persistent sessions.")
 	}
@@ -56,6 +59,16 @@ func Load() *Config {
 		log.Printf("[Config] WARNING: CONTROL_SERVER_SECRET env not set. Using default secret.")
 	}
 
+	inviteSalt := os.Getenv("ORBIT_INVITE_SALT")
+	if inviteSalt == "" {
+		saltBytes := make([]byte, 16)
+		if _, err := rand.Read(saltBytes); err != nil {
+			log.Fatalf("[Config] Failed to generate random invite salt: %v", err)
+		}
+		inviteSalt = hex.EncodeToString(saltBytes)
+		log.Printf("[Config] ORBIT_INVITE_SALT not set. Generated ephemeral salt. Set ORBIT_INVITE_SALT for deterministic invite tokens across restarts.")
+	}
+
 	return &Config{
 		Port:           port,
 		DatabasePath:   dbPath,
@@ -63,5 +76,6 @@ func Load() *Config {
 		JWTExpiry:      72 * time.Hour,
 		WebsiteURL:     websiteURL,
 		ServerSecret:   serverSecret,
+		InviteSalt:     inviteSalt,
 	}
 }

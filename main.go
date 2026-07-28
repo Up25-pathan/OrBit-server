@@ -1,11 +1,16 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"os/signal"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -24,25 +29,63 @@ func main() {
 	if err != nil {
 		log.Fatalf("database: %v", err)
 	}
-	defer db.Close()
+
+	// Graceful shutdown: create cancellable context for background goroutines
+	ctx, cancel := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
 
 	// Encrypted Cloud Relay: Start background sweeper to purge expired delta blobs (7-day TTL)
-	db.StartDeltaSweeper()
+	db.StartDeltaSweeperWithCtx(ctx)
 
 	// Presence Heartbeat: Mark users offline after 90s of inactivity
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		ticker := time.NewTicker(60 * time.Second)
-		for range ticker.C {
-			db.HeartbeatSweep()
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				db.HeartbeatSweep()
+			case <-ctx.Done():
+				return
+			}
 		}
 	}()
 
 	// Message & Activity Log Sweepers: Clean up old data periodically
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		ticker := time.NewTicker(1 * time.Hour)
-		for range ticker.C {
-			db.MessageSweep()
-			db.ActivityLogSweep()
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				db.MessageSweep()
+				db.ActivityLogSweep()
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	// Signal Sweeper: Purge stale WebRTC signaling messages every 30 minutes
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		const signalTTL = 30 * time.Minute
+		ticker := time.NewTicker(30 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				if n := db.SweepExpiredSignals(signalTTL); n > 0 {
+					log.Printf("[signal-gc] Purged %d expired signal(s)", n)
+				}
+			case <-ctx.Done():
+				return
+			}
 		}
 	}()
 
@@ -53,7 +96,7 @@ func main() {
 	authHandler := handlers.NewAuthHandler(db, validator, cfg.JWTSecret, cfg.JWTExpiry)
 	userHandler := handlers.NewUserHandler(db)
 	friendHandler := handlers.NewFriendHandler(db)
-	projectHandler := handlers.NewProjectHandler(db)
+	projectHandler := handlers.NewProjectHandler(db, cfg.InviteSalt)
 	signalingHandler := handlers.NewSignalingHandler(db)
 
 	r := chi.NewRouter()
@@ -84,7 +127,6 @@ func main() {
 			r.Get("/profile", userHandler.GetProfile)
 			r.Put("/profile", userHandler.UpdateProfile)
 			r.Put("/profile/key", userHandler.UpdatePublicKey)
-			r.Put("/users/me/profile", userHandler.UpdateProfile)
 			r.Put("/users/presence", userHandler.UpdatePresence)
 			r.Get("/users/{id}/pulse", userHandler.GetPulse)
 
@@ -135,10 +177,38 @@ func main() {
 	})
 
 	addr := fmt.Sprintf(":%s", cfg.Port)
+	srv := &http.Server{Addr: addr, Handler: r}
+
+	// Start rate limiter cleanup goroutine
+	middleware.StartRateLimiterCleanup(ctx)
+
+	// Graceful shutdown on SIGINT/SIGTERM
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		sig := <-sigCh
+		log.Printf("[server] Received signal %v — shutting down...", sig)
+		cancel()
+		// Stop accepting new requests
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer shutdownCancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			log.Printf("[server] Shutdown error: %v", err)
+		}
+	}()
+
 	log.Printf("OrBit control server listening on %s", addr)
-	if err := http.ListenAndServe(addr, r); err != nil {
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("server: %v", err)
 	}
+
+	// Wait for background goroutines to finish
+	wg.Wait()
+	// Final persist under write lock
+	if err := db.Shutdown(); err != nil {
+		log.Printf("[server] Final save error: %v", err)
+	}
+	log.Printf("[server] Shutdown complete")
 }
 
 var allowedOrigins = map[string]bool{

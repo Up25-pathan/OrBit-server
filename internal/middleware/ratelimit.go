@@ -1,6 +1,8 @@
 package middleware
 
 import (
+	"context"
+	"log"
 	"net/http"
 	"strings"
 	"sync"
@@ -21,6 +23,43 @@ type rateLimiter struct {
 
 var limiter = &rateLimiter{
 	buckets: make(map[string]*tokenBucket),
+}
+
+// StartRateLimiterCleanup periodically removes stale rate limiter entries
+// to prevent unbounded memory growth from unique IP addresses.
+func StartRateLimiterCleanup(ctx context.Context) {
+	go func() {
+		ticker := time.NewTicker(10 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				count := limiter.purgeStale()
+				if count > 0 {
+					log.Printf("[ratelimit] Purged %d stale bucket(s)", count)
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+}
+
+// purgeStale removes entries that haven't been used in over 1 hour.
+func (rl *rateLimiter) purgeStale() int {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	cutoff := time.Now().Add(-1 * time.Hour)
+	var stale []string
+	for key, b := range rl.buckets {
+		if b.refillAt.Before(cutoff) {
+			stale = append(stale, key)
+		}
+	}
+	for _, key := range stale {
+		delete(rl.buckets, key)
+	}
+	return len(stale)
 }
 
 func (rl *rateLimiter) allow(key string, maxTokens int, rate time.Duration) bool {

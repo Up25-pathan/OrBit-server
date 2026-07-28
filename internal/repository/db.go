@@ -1,10 +1,12 @@
 package repository
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -71,6 +73,35 @@ func (db *DB) Close() error {
 	return db.save()
 }
 
+// Shutdown performs a final save under write lock to guarantee all modifications
+// are persisted. Call during graceful shutdown after background goroutines stop.
+func (db *DB) Shutdown() error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	return db.saveUnderLock()
+}
+
+// saveUnderLock marshals and writes while caller holds the write lock.
+// Used only by Shutdown to ensure a consistent final snapshot.
+func (db *DB) saveUnderLock() error {
+	data, err := json.MarshalIndent(db.data, "", "  ")
+	if err != nil { return err }
+	dir := filepath.Dir(db.path)
+	tmp, err := os.CreateTemp(dir, "orbit-*.tmp")
+	if err != nil { return err }
+	tmpPath := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close(); os.Remove(tmpPath)
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close(); os.Remove(tmpPath)
+		return err
+	}
+	tmp.Close()
+	return os.Rename(tmpPath, db.path)
+}
+
 func (db *DB) load() error {
 	data, err := os.ReadFile(db.path)
 	if err != nil {
@@ -81,7 +112,9 @@ func (db *DB) load() error {
 }
 
 func (db *DB) save() error {
+	db.mu.RLock()
 	data, err := json.MarshalIndent(db.data, "", "  ")
+	db.mu.RUnlock()
 	if err != nil { return err }
 
 	dir := filepath.Dir(db.path)
@@ -106,7 +139,10 @@ func (db *DB) save() error {
 
 func generateID(prefix string) string {
 	b := make([]byte, 8)
-	rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		log.Printf("[CRYPTO] rand.Read failed: %v — using timestamp fallback", err)
+		return fmt.Sprintf("%s_%d", prefix, time.Now().UnixNano())
+	}
 	return prefix + "_" + hex.EncodeToString(b)
 }
 
@@ -114,8 +150,6 @@ func generateID(prefix string) string {
 // from the license validator. No passwords. No bcrypt.
 func (db *DB) UpsertUser(id, name, email, planTier, licenseKey string) (*models.User, error) {
 	db.mu.Lock()
-	defer db.mu.Unlock()
-
 	now := time.Now().UTC()
 	existing := db.data.Users[id]
 	if existing != nil {
@@ -136,12 +170,11 @@ func (db *DB) UpsertUser(id, name, email, planTier, licenseKey string) (*models.
 		}
 		db.data.Users[id] = existing
 	}
-
-	// Maintain license index for fast lookups
 	db.data.LicenseIndex[licenseKey] = id
+	u := *existing
+	db.mu.Unlock()
 
 	if err := db.save(); err != nil { return nil, err }
-	u := *existing
 	return &u, nil
 }
 
@@ -210,44 +243,39 @@ func searchSub(s, sub string) bool {
 
 func (db *DB) UpdateProfile(id, displayName, bio, avatarURL string) error {
 	db.mu.Lock()
-	defer db.mu.Unlock()
-
 	u := db.data.Users[id]
-	if u == nil { return fmt.Errorf("user not found") }
+	if u == nil { db.mu.Unlock(); return fmt.Errorf("user not found") }
 	u.DisplayName = displayName
 	u.Bio = bio
 	u.AvatarURL = avatarURL
 	u.UpdatedAt = time.Now().UTC()
+	db.mu.Unlock()
 	return db.save()
 }
 
 func (db *DB) UpdateStatus(id, status string) error {
 	db.mu.Lock()
-	defer db.mu.Unlock()
-
 	u := db.data.Users[id]
-	if u == nil { return fmt.Errorf("user not found") }
+	if u == nil { db.mu.Unlock(); return fmt.Errorf("user not found") }
 	u.Status = status
+	db.mu.Unlock()
 	return db.save()
 }
 
 func (db *DB) UpdatePublicKey(id, fingerprint string) error {
 	db.mu.Lock()
-	defer db.mu.Unlock()
-
 	u := db.data.Users[id]
-	if u == nil { return fmt.Errorf("user not found") }
+	if u == nil { db.mu.Unlock(); return fmt.Errorf("user not found") }
 	u.PublicKeyFingerprint = fingerprint
+	db.mu.Unlock()
 	return db.save()
 }
 
 func (db *DB) SendFriendRequest(fromID, toID string) (*models.FriendRequest, error) {
 	db.mu.Lock()
-	defer db.mu.Unlock()
-
-	if fromID == toID { return nil, fmt.Errorf("cannot send request to yourself") }
-	if db.data.Users[fromID] == nil { return nil, fmt.Errorf("sender not found") }
-	if db.data.Users[toID] == nil { return nil, fmt.Errorf("recipient not found") }
+	if fromID == toID { db.mu.Unlock(); return nil, fmt.Errorf("cannot send request to yourself") }
+	if db.data.Users[fromID] == nil { db.mu.Unlock(); return nil, fmt.Errorf("sender not found") }
+	if db.data.Users[toID] == nil { db.mu.Unlock(); return nil, fmt.Errorf("recipient not found") }
 
 	fr := &models.FriendRequest{
 		ID: generateID("frq"), FromID: fromID, ToID: toID,
@@ -255,10 +283,12 @@ func (db *DB) SendFriendRequest(fromID, toID string) (*models.FriendRequest, err
 	}
 	if existing, exists := db.data.FriendRequests[fromID+":"+toID]; exists {
 		if existing.Status == "pending" {
+			db.mu.Unlock()
 			return nil, fmt.Errorf("friend request already exists")
 		}
 	}
 	db.data.FriendRequests[fromID+":"+toID] = fr
+	db.mu.Unlock()
 	return fr, db.save()
 }
 
@@ -271,11 +301,9 @@ func sliceContains(slice []string, val string) bool {
 
 func (db *DB) AcceptFriendRequest(requestID, userID string) error {
 	db.mu.Lock()
-	defer db.mu.Unlock()
-
 	for _, fr := range db.data.FriendRequests {
 		if fr.ID == requestID && fr.Status == "pending" {
-			if fr.ToID != userID { return fmt.Errorf("not authorized to accept this request") }
+			if fr.ToID != userID { db.mu.Unlock(); return fmt.Errorf("not authorized to accept this request") }
 			fr.Status = "accepted"
 			if !sliceContains(db.data.Friends[fr.FromID], fr.ToID) {
 				db.data.Friends[fr.FromID] = append(db.data.Friends[fr.FromID], fr.ToID)
@@ -283,23 +311,25 @@ func (db *DB) AcceptFriendRequest(requestID, userID string) error {
 			if !sliceContains(db.data.Friends[fr.ToID], fr.FromID) {
 				db.data.Friends[fr.ToID] = append(db.data.Friends[fr.ToID], fr.FromID)
 			}
+			db.mu.Unlock()
 			return db.save()
 		}
 	}
+	db.mu.Unlock()
 	return fmt.Errorf("pending request not found")
 }
 
 func (db *DB) RejectFriendRequest(requestID, userID string) error {
 	db.mu.Lock()
-	defer db.mu.Unlock()
-
 	for _, fr := range db.data.FriendRequests {
 		if fr.ID == requestID && fr.Status == "pending" {
-			if fr.ToID != userID { return fmt.Errorf("not authorized to decline this request") }
+			if fr.ToID != userID { db.mu.Unlock(); return fmt.Errorf("not authorized to decline this request") }
 			fr.Status = "rejected"
+			db.mu.Unlock()
 			return db.save()
 		}
 	}
+	db.mu.Unlock()
 	return fmt.Errorf("pending request not found")
 }
 
@@ -346,8 +376,6 @@ func (db *DB) GetFriends(userID string) ([]models.Friend, error) {
 
 func (db *DB) CreateProject(name, language, domain, ownerID string) (*models.Project, error) {
 	db.mu.Lock()
-	defer db.mu.Unlock()
-
 	p := &models.Project{
 		ID: generateID("prj"), Name: name, Language: language, Domain: domain, OwnerID: ownerID, CreatedAt: time.Now().UTC(),
 	}
@@ -355,6 +383,7 @@ func (db *DB) CreateProject(name, language, domain, ownerID string) (*models.Pro
 	db.data.ProjectMembers[p.ID] = []models.ProjectMember{
 		{ProjectID: p.ID, UserID: ownerID, Role: "owner"},
 	}
+	db.mu.Unlock()
 	return p, db.save()
 }
 
@@ -387,16 +416,15 @@ func (db *DB) ListProjectsForUser(userID string) ([]models.Project, error) {
 
 func (db *DB) InviteMember(projectID, userID string) error {
 	db.mu.Lock()
-	defer db.mu.Unlock()
-
-	if db.data.Users[userID] == nil { return fmt.Errorf("user not found") }
+	if db.data.Users[userID] == nil { db.mu.Unlock(); return fmt.Errorf("user not found") }
 	members := db.data.ProjectMembers[projectID]
 	for _, m := range members {
-		if m.UserID == userID { return nil }
+		if m.UserID == userID { db.mu.Unlock(); return nil }
 	}
 	db.data.ProjectMembers[projectID] = append(members, models.ProjectMember{
 		ProjectID: projectID, UserID: userID, Role: "member", Path: "",
 	})
+	db.mu.Unlock()
 	return db.save()
 }
 
@@ -424,23 +452,21 @@ func (db *DB) GetProjectMembers(projectID string) ([]models.ProjectMember, error
 
 func (db *DB) UpdateProject(p *models.Project) error {
 	db.mu.Lock()
-	defer db.mu.Unlock()
-
 	existing := db.data.Projects[p.ID]
-	if existing == nil { return fmt.Errorf("project not found") }
+	if existing == nil { db.mu.Unlock(); return fmt.Errorf("project not found") }
 	existing.Name = p.Name
+	db.mu.Unlock()
 	return db.save()
 }
 
 func (db *DB) StoreDelta(projectID, authorID, data string) (*models.ProjectDelta, error) {
 	db.mu.Lock()
-	defer db.mu.Unlock()
-
 	d := &models.ProjectDelta{
 		ID: generateID("dlt"), ProjectID: projectID,
 		AuthorID: authorID, Data: data, CreatedAt: time.Now().UTC(),
 	}
 	db.data.Deltas[projectID] = append(db.data.Deltas[projectID], *d)
+	db.mu.Unlock()
 	return d, db.save()
 }
 
@@ -468,8 +494,6 @@ func (db *DB) GetDeltas(projectID string, since time.Time) ([]models.ProjectDelt
 // This is the "Rolling Window" approach from the Encrypted Cloud Relay spec.
 func (db *DB) SweepExpiredDeltas(ttl time.Duration) int {
 	db.mu.Lock()
-	defer db.mu.Unlock()
-
 	cutoff := time.Now().UTC().Add(-ttl)
 	swept := 0
 
@@ -488,30 +512,39 @@ func (db *DB) SweepExpiredDeltas(ttl time.Duration) int {
 			db.data.Deltas[projectID] = kept
 		}
 	}
+	db.mu.Unlock()
 
 	if swept > 0 {
-		db.save()
+		if err := db.save(); err != nil {
+			log.Printf("[delta-sweep] save failed: %v", err)
+		}
 	}
 	return swept
 }
 
-// StartDeltaSweeper launches a background goroutine that periodically purges
+// StartDeltaSweeperWithCtx launches a background goroutine that periodically purges
 // expired encrypted relay blobs. It runs every hour with a 7-day TTL.
-func (db *DB) StartDeltaSweeper() {
+// The goroutine stops when ctx is cancelled.
+func (db *DB) StartDeltaSweeperWithCtx(ctx context.Context) {
 	const deltaTTL = 7 * 24 * time.Hour
 	const sweepInterval = 1 * time.Hour
 
 	go func() {
 		// Run an initial sweep on startup
 		if n := db.SweepExpiredDeltas(deltaTTL); n > 0 {
-			fmt.Printf("[relay-gc] Startup sweep: purged %d expired delta(s)\n", n)
+			log.Printf("[relay-gc] Startup sweep: purged %d expired delta(s)\n", n)
 		}
 
 		ticker := time.NewTicker(sweepInterval)
 		defer ticker.Stop()
-		for range ticker.C {
-			if n := db.SweepExpiredDeltas(deltaTTL); n > 0 {
-				fmt.Printf("[relay-gc] Periodic sweep: purged %d expired delta(s)\n", n)
+		for {
+			select {
+			case <-ticker.C:
+				if n := db.SweepExpiredDeltas(deltaTTL); n > 0 {
+					log.Printf("[relay-gc] Periodic sweep: purged %d expired delta(s)\n", n)
+				}
+			case <-ctx.Done():
+				return
 			}
 		}
 	}()
@@ -519,16 +552,14 @@ func (db *DB) StartDeltaSweeper() {
 
 func (db *DB) CreateTask(projectID, title, assigneeID, creatorID string) (*models.Task, error) {
 	db.mu.Lock()
-	defer db.mu.Unlock()
-
 	task := &models.Task{
 		ID: generateID("tsk"), ProjectID: projectID, Title: title, AssigneeID: assigneeID, CreatorID: creatorID, Status: "open", CreatedAt: time.Now().UTC(),
 	}
 	db.data.Tasks[projectID] = append(db.data.Tasks[projectID], task)
-	if err := db.save(); err != nil { return nil, err }
-	
-	// Make a copy
 	ct := *task
+	db.mu.Unlock()
+
+	if err := db.save(); err != nil { return nil, err }
 	return &ct, nil
 }
 
@@ -552,42 +583,40 @@ func (db *DB) GetTasks(projectID string) ([]models.Task, error) {
 
 func (db *DB) CompleteTask(projectID, taskID string) (*models.Task, error) {
 	db.mu.Lock()
-	defer db.mu.Unlock()
-
 	tasks := db.data.Tasks[projectID]
 	for _, t := range tasks {
 		if t.ID == taskID {
 			t.Status = "completed"
 			now := time.Now().UTC()
 			t.CompletedAt = &now
-			if err := db.save(); err != nil { return nil, err }
 			ct := *t
+			db.mu.Unlock()
+			if err := db.save(); err != nil { return nil, err }
 			return &ct, nil
 		}
 	}
+	db.mu.Unlock()
 	return nil, fmt.Errorf("task not found")
 }
 
 func (db *DB) LogActivity(userID, projectID, action string) error {
 	db.mu.Lock()
-	defer db.mu.Unlock()
-
 	log := models.ActivityLog{
 		ID: generateID("act"), UserID: userID, ProjectID: projectID, Action: action, CreatedAt: time.Now().UTC(),
 	}
 	db.data.ActivityLogs = append(db.data.ActivityLogs, log)
+	db.mu.Unlock()
 	return db.save()
 }
 
 func (db *DB) UpdatePresence(userID, activity string) error {
 	db.mu.Lock()
-	defer db.mu.Unlock()
-
 	u := db.data.Users[userID]
-	if u == nil { return fmt.Errorf("user not found") }
+	if u == nil { db.mu.Unlock(); return fmt.Errorf("user not found") }
 	u.Activity = activity
 	u.Status = "online"
 	u.LastSeen = time.Now().UTC()
+	db.mu.Unlock()
 	return db.save()
 }
 
@@ -595,15 +624,17 @@ func (db *DB) UpdatePresence(userID, activity string) error {
 // periodic presence call brings them back online.
 func (db *DB) HeartbeatSweep() {
 	db.mu.Lock()
-	defer db.mu.Unlock()
-
 	cutoff := time.Now().UTC().Add(-90 * time.Second)
 	for _, u := range db.data.Users {
 		if u.LastSeen.IsZero() || u.LastSeen.Before(cutoff) {
 			u.Status = "offline"
 		}
 	}
-	_ = db.save()
+	db.mu.Unlock()
+
+	if err := db.save(); err != nil {
+		log.Printf("[heartbeat] save failed: %v", err)
+	}
 }
 
 func (db *DB) GetPulse(userID string) ([]models.PulseEntry, error) {
@@ -695,8 +726,6 @@ func (db *DB) IsProjectOwner(projectID, userID string) bool {
 
 func (db *DB) UpdateMemberPath(projectID, userID, path string) error {
 	db.mu.Lock()
-	defer db.mu.Unlock()
-
 	members := db.data.ProjectMembers[projectID]
 	updated := false
 	for i, m := range members {
@@ -707,16 +736,16 @@ func (db *DB) UpdateMemberPath(projectID, userID, path string) error {
 		}
 	}
 	if !updated {
+		db.mu.Unlock()
 		return fmt.Errorf("member not found in project")
 	}
 	db.data.ProjectMembers[projectID] = members
+	db.mu.Unlock()
 	return db.save()
 }
 
 func (db *DB) SaveMessage(projectID, authorID, text string) (*models.ChatMessage, error) {
 	db.mu.Lock()
-	defer db.mu.Unlock()
-
 	m := &models.ChatMessage{
 		ID:        generateID("msg"),
 		ProjectID: projectID,
@@ -724,13 +753,7 @@ func (db *DB) SaveMessage(projectID, authorID, text string) (*models.ChatMessage
 		Text:      text,
 		CreatedAt: time.Now().UTC(),
 	}
-
 	db.data.Messages[projectID] = append(db.data.Messages[projectID], m)
-	if err := db.save(); err != nil {
-		return nil, err
-	}
-
-	// Populate author details
 	u := db.data.Users[authorID]
 	if u != nil {
 		m.Author = models.UserSearchResult{
@@ -739,7 +762,11 @@ func (db *DB) SaveMessage(projectID, authorID, text string) (*models.ChatMessage
 			AvatarURL:   u.AvatarURL,
 		}
 	}
+	db.mu.Unlock()
 
+	if err := db.save(); err != nil {
+		return nil, err
+	}
 	return m, nil
 }
 
@@ -771,8 +798,6 @@ func (db *DB) GetMessages(projectID string, offset, limit int) ([]models.ChatMes
 
 func (db *DB) DeleteTask(projectID, taskID string) error {
 	db.mu.Lock()
-	defer db.mu.Unlock()
-
 	tasks := db.data.Tasks[projectID]
 	var kept []*models.Task
 	for _, t := range tasks {
@@ -781,13 +806,12 @@ func (db *DB) DeleteTask(projectID, taskID string) error {
 		}
 	}
 	db.data.Tasks[projectID] = kept
+	db.mu.Unlock()
 	return db.save()
 }
 
 func (db *DB) DeleteProject(projectID string) error {
 	db.mu.Lock()
-	defer db.mu.Unlock()
-
 	delete(db.data.Projects, projectID)
 	delete(db.data.ProjectMembers, projectID)
 	delete(db.data.Tasks, projectID)
@@ -801,15 +825,13 @@ func (db *DB) DeleteProject(projectID string) error {
 		}
 	}
 	db.data.Signals = keptSignals
-
+	db.mu.Unlock()
 	return db.save()
 }
 
 // MessageSweep deletes chat messages older than 30 days.
 func (db *DB) MessageSweep() {
 	db.mu.Lock()
-	defer db.mu.Unlock()
-
 	cutoff := time.Now().UTC().Add(-30 * 24 * time.Hour)
 	dirty := false
 	for pid, msgs := range db.data.Messages {
@@ -824,14 +846,18 @@ func (db *DB) MessageSweep() {
 			dirty = true
 		}
 	}
-	if dirty { _ = db.save() }
+	db.mu.Unlock()
+
+	if dirty {
+		if err := db.save(); err != nil {
+			log.Printf("[message-sweep] save failed: %v", err)
+		}
+	}
 }
 
 // ActivityLogSweep prunes activity logs older than 90 days.
 func (db *DB) ActivityLogSweep() {
 	db.mu.Lock()
-	defer db.mu.Unlock()
-
 	cutoff := time.Now().UTC().Add(-90 * 24 * time.Hour)
 	var kept []models.ActivityLog
 	for _, l := range db.data.ActivityLogs {
@@ -839,8 +865,15 @@ func (db *DB) ActivityLogSweep() {
 			kept = append(kept, l)
 		}
 	}
-	if len(kept) != len(db.data.ActivityLogs) {
+	dirty := len(kept) != len(db.data.ActivityLogs)
+	if dirty {
 		db.data.ActivityLogs = kept
-		_ = db.save()
+	}
+	db.mu.Unlock()
+
+	if dirty {
+		if err := db.save(); err != nil {
+			log.Printf("[activity-sweep] save failed: %v", err)
+		}
 	}
 }

@@ -1,10 +1,33 @@
 package repository
 
-import "time"
+import (
+	"log"
+	"time"
+)
+
+func (db *DB) SweepExpiredSignals(ttl time.Duration) int {
+	db.mu.Lock()
+	cutoff := time.Now().UTC().Add(-ttl)
+	var kept []Signal
+	for _, s := range db.data.Signals {
+		if s.CreatedAt.After(cutoff) {
+			kept = append(kept, s)
+		}
+	}
+	swept := len(db.data.Signals) - len(kept)
+	db.data.Signals = kept
+	db.mu.Unlock()
+
+	if swept > 0 {
+		if err := db.save(); err != nil {
+			log.Printf("[signal-sweep] save failed: %v", err)
+		}
+	}
+	return swept
+}
 
 func (db *DB) SaveSignal(projectID, fromPeer, toPeer, signalType, payload string) error {
 	db.mu.Lock()
-	defer db.mu.Unlock()
 	sig := Signal{
 		ID:        generateID("sig"),
 		ProjectID: projectID,
@@ -15,7 +38,6 @@ func (db *DB) SaveSignal(projectID, fromPeer, toPeer, signalType, payload string
 		CreatedAt: time.Now().UTC(),
 	}
 
-	// Sweep abandoned signals older than 30 minutes to prevent memory leaks
 	cutoff := time.Now().UTC().Add(-30 * time.Minute)
 	var kept []Signal
 	for _, s := range db.data.Signals {
@@ -25,6 +47,7 @@ func (db *DB) SaveSignal(projectID, fromPeer, toPeer, signalType, payload string
 	}
 	kept = append(kept, sig)
 	db.data.Signals = kept
+	db.mu.Unlock()
 
 	return db.save()
 }
@@ -43,7 +66,6 @@ func (db *DB) GetPendingSignalsForPeer(projectID, toPeer string) ([]Signal, erro
 
 func (db *DB) ClearSignalsForPeer(projectID, toPeer string) error {
 	db.mu.Lock()
-	defer db.mu.Unlock()
 	var kept []Signal
 	for _, s := range db.data.Signals {
 		if !(s.ProjectID == projectID && s.ToPeer == toPeer) {
@@ -51,5 +73,6 @@ func (db *DB) ClearSignalsForPeer(projectID, toPeer string) error {
 		}
 	}
 	db.data.Signals = kept
+	db.mu.Unlock()
 	return db.save()
 }

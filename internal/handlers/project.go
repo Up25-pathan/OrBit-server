@@ -19,11 +19,12 @@ import (
 const maxRequestBodySize = 1 << 20 // 1 MiB
 
 type ProjectHandler struct {
-	db *repository.DB
+	db         *repository.DB
+	inviteSalt string
 }
 
-func NewProjectHandler(db *repository.DB) *ProjectHandler {
-	return &ProjectHandler{db: db}
+func NewProjectHandler(db *repository.DB, inviteSalt string) *ProjectHandler {
+	return &ProjectHandler{db: db, inviteSalt: inviteSalt}
 }
 
 func (h *ProjectHandler) Create(w http.ResponseWriter, r *http.Request) {
@@ -102,7 +103,7 @@ func (h *ProjectHandler) GenerateToken(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "not a member"}); return
 	}
 
-	hash := sha256.Sum256([]byte(projectID + "_orbit_secret_salt"))
+	hash := sha256.Sum256([]byte(projectID + h.inviteSalt))
 	token := fmt.Sprintf("orbit_inv_%x_%s", hash[:8], projectID)
 	writeJSON(w, http.StatusOK, map[string]string{"token": token})
 }
@@ -127,7 +128,7 @@ func (h *ProjectHandler) JoinByToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	projectID := strings.Join(parts[3:], "_")
-	expectedHash := sha256.Sum256([]byte(projectID + "_orbit_secret_salt"))
+	expectedHash := sha256.Sum256([]byte(projectID + h.inviteSalt))
 	expectedPrefix := fmt.Sprintf("%x", expectedHash[:8])
 	if parts[2] != expectedPrefix {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "invite token signature verification failed"}); return
