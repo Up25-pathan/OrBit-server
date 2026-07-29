@@ -115,7 +115,7 @@ func RateLimit(next http.Handler) http.Handler {
 			return
 		}
 		if strings.HasSuffix(path, "/auth/license") {
-			if !limiter.allow("auth:"+ip, 100, time.Minute) {
+			if !limiter.allow("auth:"+ip, 500, time.Minute) {
 				http.Error(w, `{"error":"rate limit exceeded"}`, http.StatusTooManyRequests)
 				return
 			}
@@ -123,10 +123,10 @@ func RateLimit(next http.Handler) http.Handler {
 			return
 		}
 
-		// Write endpoints (POST/PUT/DELETE): high capacity
+		// Write endpoints (POST/PUT/DELETE): burst-tolerant
 		method := r.Method
 		if method == "POST" || method == "PUT" || method == "DELETE" {
-			if !limiter.allow("write:"+ip, 300, time.Minute) {
+			if !limiter.allow("write:"+ip, 2000, time.Minute) {
 				http.Error(w, `{"error":"rate limit exceeded"}`, http.StatusTooManyRequests)
 				return
 			}
@@ -134,8 +134,8 @@ func RateLimit(next http.Handler) http.Handler {
 			return
 		}
 
-		// Read endpoints: high capacity for live polling and search
-		if !limiter.allow("read:"+ip, 1200, time.Minute) {
+		// Read endpoints: generous limit for live polling and search
+		if !limiter.allow("read:"+ip, 10000, time.Minute) {
 			http.Error(w, `{"error":"rate limit exceeded"}`, http.StatusTooManyRequests)
 			return
 		}
