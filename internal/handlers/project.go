@@ -16,7 +16,7 @@ import (
 	"github.com/orbit/control-server/internal/repository"
 )
 
-const maxRequestBodySize = 1 << 20 // 1 MiB
+const maxRequestBodySize = 11 << 20 // 11 MiB — must exceed maxDeltaDataSize (10 MB) + JSON envelope
 
 type ProjectHandler struct {
 	db         *repository.DB
