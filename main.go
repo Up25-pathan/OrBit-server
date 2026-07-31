@@ -163,6 +163,9 @@ func main() {
 			// POST stores the E2EE encrypted blob; GET delivers missed packages to offline peers.
 			r.Post("/projects/{id}/push", projectHandler.PushDelta)
 			r.Get("/projects/{id}/pull", projectHandler.PullDeltas)
+			// Clients confirm a delta was applied locally; the relay clears the
+			// blob once every member has acked (no more stale re-delivery).
+			r.Post("/projects/{id}/ack", projectHandler.AckDelta)
 
 			r.Post("/projects/{id}/tasks", projectHandler.CreateTask)
 			r.Get("/projects/{id}/tasks", projectHandler.ListTasks)

@@ -251,6 +251,33 @@ func (h *ProjectHandler) PullDeltas(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, sanitized)
 }
 
+func (h *ProjectHandler) AckDelta(w http.ResponseWriter, r *http.Request) {
+	userID := middleware.GetUserID(r)
+	if userID == "" { writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"}); return }
+
+	projectID := chi.URLParam(r, "id")
+	if !h.db.IsProjectMember(projectID, userID) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "not a member"}); return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+	var req struct {
+		DeltaID string `json:"deltaId"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"}); return
+	}
+	if req.DeltaID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "deltaId is required"}); return
+	}
+
+	if err := h.db.AckDelta(projectID, req.DeltaID, userID); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()}); return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "acked"})
+}
+
 func (h *ProjectHandler) CreateTask(w http.ResponseWriter, r *http.Request) {
 	userID := middleware.GetUserID(r)
 	if userID == "" { writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"}); return }

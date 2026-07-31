@@ -38,6 +38,10 @@ type ProjectDelta struct {
 	Data      string    `json:"data"`
 	CreatedAt time.Time `json:"createdAt"`
 	Author    PublicUser `json:"author"`
+	// AckedBy tracks which project members have confirmed this delta was
+	// applied locally. When every current member has acked, the relay deletes
+	// the blob so "dead drops" don't accumulate forever.
+	AckedBy []string `json:"ackedBy,omitempty"`
 }
 
 type CreateProjectRequest struct {

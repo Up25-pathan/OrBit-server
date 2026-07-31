@@ -470,6 +470,51 @@ func (db *DB) StoreDelta(projectID, authorID, data string) (*models.ProjectDelta
 	return d, db.save()
 }
 
+// AckDelta marks a relay delta as applied by userID. Once every current project
+// member has acked the same delta, the blob is removed from the relay so pushed
+// data is cleared once all peers are on the same update.
+func (db *DB) AckDelta(projectID, deltaID, userID string) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	deltas := db.data.Deltas[projectID]
+	members := db.data.ProjectMembers[projectID]
+	memberCount := len(members)
+	if memberCount == 0 {
+		memberCount = 1
+	}
+
+	var kept []models.ProjectDelta
+	changed := false
+	for _, d := range deltas {
+		if d.ID != deltaID {
+			kept = append(kept, d)
+			continue
+		}
+		if !sliceContains(d.AckedBy, userID) {
+			d.AckedBy = append(d.AckedBy, userID)
+			changed = true
+		}
+		if len(d.AckedBy) < memberCount {
+			kept = append(kept, d)
+		} else {
+			// All current members acked — drop the blob entirely
+			changed = true
+		}
+	}
+
+	if len(kept) == 0 {
+		delete(db.data.Deltas, projectID)
+	} else {
+		db.data.Deltas[projectID] = kept
+	}
+
+	if !changed {
+		return nil
+	}
+	return db.save()
+}
+
 func (db *DB) GetDeltas(projectID string, since time.Time) ([]models.ProjectDelta, error) {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
