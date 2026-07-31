@@ -495,10 +495,21 @@ func (db *DB) AckDelta(projectID, deltaID, userID string) error {
 			d.AckedBy = append(d.AckedBy, userID)
 			changed = true
 		}
-		if len(d.AckedBy) < memberCount {
+		// The author already has the content, so the blob only needs an ack from
+		// every CURRENT member EXCEPT the author. Without this, a delta could
+		// never reach memberCount (the client never acks its own pushes) and the
+		// relay blob would accumulate until the 7-day sweep.
+		neededAcks := memberCount
+		for _, m := range members {
+			if m.UserID == d.AuthorID {
+				neededAcks--
+				break
+			}
+		}
+		if len(d.AckedBy) < neededAcks {
 			kept = append(kept, d)
 		} else {
-			// All current members acked — drop the blob entirely
+			// All required peers acked — drop the blob entirely
 			changed = true
 		}
 	}
