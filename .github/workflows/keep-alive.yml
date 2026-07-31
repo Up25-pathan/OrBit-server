@@ -2,8 +2,10 @@ name: Keep Server Alive
 
 on:
   schedule:
-    # Every 14 minutes (Render free tier spins down after 15 min idle)
-    - cron: '*/14 * * * *'
+    # Every 5 minutes — Render free tier spins down after ~15 min idle, and GitHub
+    # Actions cron is often delayed several minutes, so the old 14-min cadence
+    # let the instance fall asleep (causing 15s client timeouts / "unable to connect").
+    - cron: '*/5 * * * *'
   workflow_dispatch: # Allow manual trigger
 
 jobs:
