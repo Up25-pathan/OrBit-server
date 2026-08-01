@@ -112,9 +112,16 @@ func (db *DB) load() error {
 }
 
 func (db *DB) save() error {
-	db.mu.RLock()
+	// Hold the write lock across marshalling AND the atomic file write so a
+	// concurrent mutation cannot interleave between the snapshot and the rename
+	// and get lost. Previously this marshalled under RLock, released the lock,
+	// then wrote — a writer that committed in between could be overwritten by
+	// this stale snapshot (lost update). Every caller must call save() WITHOUT
+	// holding the lock.
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
 	data, err := json.MarshalIndent(db.data, "", "  ")
-	db.mu.RUnlock()
 	if err != nil { return err }
 
 	dir := filepath.Dir(db.path)
@@ -475,7 +482,6 @@ func (db *DB) StoreDelta(projectID, authorID, data string) (*models.ProjectDelta
 // data is cleared once all peers are on the same update.
 func (db *DB) AckDelta(projectID, deltaID, userID string) error {
 	db.mu.Lock()
-	defer db.mu.Unlock()
 
 	deltas := db.data.Deltas[projectID]
 	members := db.data.ProjectMembers[projectID]
@@ -491,7 +497,9 @@ func (db *DB) AckDelta(projectID, deltaID, userID string) error {
 			kept = append(kept, d)
 			continue
 		}
-		if !sliceContains(d.AckedBy, userID) {
+		// The author already has the content, so their own ack must never count —
+		// only ack from current members OTHER than the author.
+		if d.AuthorID != userID && !sliceContains(d.AckedBy, userID) {
 			d.AckedBy = append(d.AckedBy, userID)
 			changed = true
 		}
@@ -521,8 +529,10 @@ func (db *DB) AckDelta(projectID, deltaID, userID string) error {
 	}
 
 	if !changed {
+		db.mu.Unlock()
 		return nil
 	}
+	db.mu.Unlock()
 	return db.save()
 }
 
@@ -537,7 +547,7 @@ func (db *DB) GetDeltas(projectID string, since time.Time) ([]models.ProjectDelt
 			u := db.data.Users[d.AuthorID]
 			if u != nil {
 				d.Author = models.PublicUser{
-					ID: u.ID, Name: u.DisplayName, Status: u.Status,
+					ID: u.ID, Name: u.DisplayName, DisplayName: u.DisplayName, Status: u.Status,
 				}
 			}
 			result = append(result, d)

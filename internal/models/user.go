@@ -18,11 +18,12 @@ type User struct {
 }
 
 type PublicUser struct {
-	ID     string `json:"id"`
-	Name   string `json:"name"`
-	Status string `json:"status,omitempty"`
-	Email  string `json:"-"`
-	Bio    string `json:"-"`
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	DisplayName string `json:"displayName,omitempty"`
+	Status      string `json:"status,omitempty"`
+	Email       string `json:"-"`
+	Bio         string `json:"-"`
 }
 
 // LicenseAuthRequest is the single authentication payload — just a key.

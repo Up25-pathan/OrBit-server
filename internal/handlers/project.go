@@ -240,9 +240,10 @@ func (h *ProjectHandler) PullDeltas(w http.ResponseWriter, r *http.Request) {
 	for i, d := range deltas {
 		sanitized[i] = d
 		sanitized[i].Author = models.PublicUser{
-			ID:     d.Author.ID,
-			Name:   d.Author.Name,
-			Status: d.Author.Status,
+			ID:          d.Author.ID,
+			Name:        d.Author.Name,
+			DisplayName: d.Author.Name,
+			Status:      d.Author.Status,
 		}
 		sanitized[i].Author.Email = ""
 		sanitized[i].Author.Bio = ""
