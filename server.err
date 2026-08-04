@@ -1,3 +1,0 @@
-2026/07/29 11:06:38 [Config] Warning: ORBIT_JWT_SECRET env not set, using default signing secret.
-2026/07/29 11:06:38 [License Authority] Verifying licenses against Website Server at https://orbit-sync.onrender.com (Mock Keys: true)
-2026/07/29 11:06:38 OrBit control server listening on :9090

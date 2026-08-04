@@ -2,6 +2,10 @@
 *.db
 *.json
 !go.json
+orbit.jwt-secret
+orbit.invite-salt
+server.err
+server.log
 .vscode/
 
 .env

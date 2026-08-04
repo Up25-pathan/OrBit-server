@@ -5,6 +5,8 @@ import (
 	"encoding/hex"
 	"log"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -33,17 +35,8 @@ func Load() *Config {
 		dbPath = "orbit.db"
 	}
 
-	secret := os.Getenv("ORBIT_JWT_SECRET")
-	if secret == "" {
-		// Audit Fix #7: Generate a random JWT secret instead of using a hardcoded default.
-		// This secret won't persist across restarts unless the env var is set.
-		randomBytes := make([]byte, 32)
-		if _, err := rand.Read(randomBytes); err != nil {
-			log.Fatalf("[Config] Failed to generate random JWT secret: %v", err)
-		}
-		secret = hex.EncodeToString(randomBytes)
-		log.Printf("[Config] WARNING: ORBIT_JWT_SECRET env not set. Generated ephemeral secret. Set ORBIT_JWT_SECRET for persistent sessions.")
-	}
+	jwtSecret := loadOrCreateSecret("ORBIT_JWT_SECRET", secretFilePath(dbPath, "orbit.jwt-secret"), 32, "JWT")
+	inviteSalt := loadOrCreateSecret("ORBIT_INVITE_SALT", secretFilePath(dbPath, "orbit.invite-salt"), 16, "invite")
 
 	websiteURL := os.Getenv("WEBSITE_SERVER_URL")
 	if websiteURL == "" {
@@ -59,23 +52,49 @@ func Load() *Config {
 		log.Printf("[Config] WARNING: CONTROL_SERVER_SECRET env not set. Using default secret.")
 	}
 
-	inviteSalt := os.Getenv("ORBIT_INVITE_SALT")
-	if inviteSalt == "" {
-		saltBytes := make([]byte, 16)
-		if _, err := rand.Read(saltBytes); err != nil {
-			log.Fatalf("[Config] Failed to generate random invite salt: %v", err)
-		}
-		inviteSalt = hex.EncodeToString(saltBytes)
-		log.Printf("[Config] ORBIT_INVITE_SALT not set. Generated ephemeral salt. Set ORBIT_INVITE_SALT for deterministic invite tokens across restarts.")
-	}
-
 	return &Config{
 		Port:           port,
 		DatabasePath:   dbPath,
-		JWTSecret:      secret,
+		JWTSecret:      jwtSecret,
 		JWTExpiry:      72 * time.Hour,
 		WebsiteURL:     websiteURL,
 		ServerSecret:   serverSecret,
 		InviteSalt:     inviteSalt,
 	}
+}
+
+// secretFilePath returns a path for a persisted secret file next to the
+// database, so the secret survives process restarts (e.g. Render cold starts).
+func secretFilePath(dbPath, fileName string) string {
+	dir := filepath.Dir(dbPath)
+	if dir == "." {
+		return fileName
+	}
+	return filepath.Join(dir, fileName)
+}
+
+// loadOrCreateSecret returns the secret from the environment when set, or from
+// a persisted file when present, otherwise generates a fresh secret, writes it
+// to the file (0600), and returns it. This keeps JWT/invite secrets stable
+// across restarts without requiring the operator to manage another env var.
+func loadOrCreateSecret(envKey, filePath string, byteLen int, purpose string) string {
+	if fromEnv := os.Getenv(envKey); fromEnv != "" {
+		return fromEnv
+	}
+	if data, err := os.ReadFile(filePath); err == nil {
+		if trimmed := strings.TrimSpace(string(data)); trimmed != "" {
+			return trimmed
+		}
+	}
+	randomBytes := make([]byte, byteLen)
+	if _, err := rand.Read(randomBytes); err != nil {
+		log.Fatalf("[Config] Failed to generate %s secret: %v", purpose, err)
+	}
+	secret := hex.EncodeToString(randomBytes)
+	if err := os.WriteFile(filePath, []byte(secret+"\n"), 0600); err != nil {
+		log.Printf("[Config] WARNING: %s secret generated but could not persist to %s: %v", purpose, filePath, err)
+	} else {
+		log.Printf("[Config] %s secret persisted to %s. Sessions stay valid across restarts.", purpose, filePath)
+	}
+	return secret
 }
