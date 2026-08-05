@@ -141,7 +141,7 @@ func (h *UserHandler) UpdatePresence(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.db.UpdatePresence(userID, req.Activity); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to update presence"}); return
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "session expired or user not found"}); return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
 }
