@@ -16,7 +16,7 @@ import (
 	"github.com/orbit/control-server/internal/repository"
 )
 
-const maxRequestBodySize = 11 << 20 // 11 MiB — must exceed maxDeltaDataSize (10 MB) + JSON envelope
+const maxRequestBodySize = 26 << 20 // 26 MiB — must exceed maxDeltaDataSize (25 MB) + JSON envelope
 
 type ProjectHandler struct {
 	db         *repository.DB
@@ -156,9 +156,9 @@ func (h *ProjectHandler) PushDelta(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"}); return
 	}
 	if req.Data == "" { writeJSON(w, http.StatusBadRequest, map[string]string{"error": "data is required"}); return }
-	const maxDeltaDataSize = 10 * 1024 * 1024 // 10 MB
+	const maxDeltaDataSize = 25 * 1024 * 1024 // 25 MB — must stay under maxRequestBodySize (26 MiB)
 	if len(req.Data) > maxDeltaDataSize {
-		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "delta data exceeds 10 MB limit"}); return
+		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "delta data exceeds 25 MB limit"}); return
 	}
 
 	delta, err := h.db.StoreDelta(projectID, userID, req.Data)
