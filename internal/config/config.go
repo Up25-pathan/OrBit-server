@@ -19,9 +19,36 @@ type Config struct {
 	ServerSecret   string
 	EnableMockKeys bool
 	InviteSalt     string
+	Backup         BackupConfig
+}
+
+// BackupConfig configures the optional durable backup of the database and
+// persisted secrets to a Cloudflare R2 bucket (or any S3-compatible store).
+// When enabled, every save uploads the state files and a startup restores any
+// file that is missing locally — so friendships, project memberships and
+// relayed deltas survive Render's ephemeral filesystem wipes on restart/redeploy.
+type BackupConfig struct {
+	Enabled   bool
+	Endpoint  string // e.g. https://<account>.r2.cloudflarestorage.com
+	Bucket    string
+	AccessKey string
+	SecretKey string
+	Region    string // R2 uses "auto"
 }
 
 func Load() *Config {
+	c := LoadEnv()
+
+	c.JWTSecret = loadOrCreateSecret("ORBIT_JWT_SECRET", secretFilePath(c.DatabasePath, "orbit.jwt-secret"), 32, "JWT")
+	c.InviteSalt = loadOrCreateSecret("ORBIT_INVITE_SALT", secretFilePath(c.DatabasePath, "orbit.invite-salt"), 16, "invite")
+
+	return c
+}
+
+// LoadEnv reads everything except the JWT/invite secrets. Keeping this separate
+// from Load() lets main.go restore the persisted secret files from backup BEFORE
+// Load() reads (or regenerates) them.
+func LoadEnv() *Config {
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = os.Getenv("ORBIT_PORT")
@@ -34,9 +61,6 @@ func Load() *Config {
 	if dbPath == "" {
 		dbPath = "orbit.db"
 	}
-
-	jwtSecret := loadOrCreateSecret("ORBIT_JWT_SECRET", secretFilePath(dbPath, "orbit.jwt-secret"), 32, "JWT")
-	inviteSalt := loadOrCreateSecret("ORBIT_INVITE_SALT", secretFilePath(dbPath, "orbit.invite-salt"), 16, "invite")
 
 	websiteURL := os.Getenv("WEBSITE_SERVER_URL")
 	if websiteURL == "" {
@@ -52,15 +76,36 @@ func Load() *Config {
 		log.Printf("[Config] WARNING: CONTROL_SERVER_SECRET env not set. Using default secret.")
 	}
 
-	return &Config{
-		Port:           port,
-		DatabasePath:   dbPath,
-		JWTSecret:      jwtSecret,
-		JWTExpiry:      72 * time.Hour,
-		WebsiteURL:     websiteURL,
-		ServerSecret:   serverSecret,
-		InviteSalt:     inviteSalt,
+	c := &Config{
+		Port:         port,
+		DatabasePath: dbPath,
+		JWTExpiry:    72 * time.Hour,
+		WebsiteURL:   websiteURL,
+		ServerSecret: serverSecret,
+		Backup: BackupConfig{
+			Endpoint:  os.Getenv("ORBIT_BACKUP_ENDPOINT"),
+			Bucket:    os.Getenv("ORBIT_BACKUP_BUCKET"),
+			AccessKey: os.Getenv("ORBIT_BACKUP_ACCESS_KEY"),
+			SecretKey: os.Getenv("ORBIT_BACKUP_SECRET_KEY"),
+			Region:    firstNonEmpty(os.Getenv("ORBIT_BACKUP_REGION"), "auto"),
+		},
 	}
+	c.Backup.Enabled = c.Backup.Endpoint != "" && c.Backup.Bucket != "" &&
+		c.Backup.AccessKey != "" && c.Backup.SecretKey != ""
+	if c.Backup.Enabled {
+		log.Printf("[Backup] Durable backup ENABLED: bucket=%s endpoint=%s", c.Backup.Bucket, c.Backup.Endpoint)
+	}
+
+	return c
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // secretFilePath returns a path for a persisted secret file next to the

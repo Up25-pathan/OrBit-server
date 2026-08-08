@@ -10,8 +10,10 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/orbit/control-server/internal/config"
 	"github.com/orbit/control-server/internal/models"
 )
 
@@ -43,6 +45,9 @@ type DB struct {
 	mu   sync.RWMutex
 	path string
 	data *store
+
+	backup          *BackupSink
+	backupUploading atomic.Bool
 }
 
 func New(path string) (*DB, error) {
@@ -73,12 +78,62 @@ func (db *DB) Close() error {
 	return db.save()
 }
 
+// SetBackup attaches the durable backup sink. No-op when the sink can't be built
+// (or backup isn't configured), so local development is unaffected.
+func (db *DB) SetBackup(cfg config.BackupConfig) {
+	if !cfg.Enabled {
+		return
+	}
+	sink, err := NewBackupSink(cfg)
+	if err != nil {
+		log.Printf("[Backup] failed to attach backup sink: %v", err)
+		return
+	}
+	db.backup = sink
+	log.Printf("[Backup] backup sink attached (bucket=%s)", cfg.Bucket)
+}
+
+// triggerBackup uploads the latest state asynchronously. At most one upload is
+// in flight at a time; if saves outpace uploads, intermediate versions are
+// skipped and the newest state is uploaded on the next save.
+func (db *DB) triggerBackup(data []byte) {
+	if db.backup == nil {
+		return
+	}
+	if !db.backupUploading.CompareAndSwap(false, true) {
+		return
+	}
+	backup := db.backup
+	dbPath := db.path
+	go func() {
+		defer db.backupUploading.Store(false)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := backup.UploadDB(ctx, dbPath, data); err != nil {
+			log.Printf("[Backup] upload failed (will retry on next save): %v", err)
+		}
+	}()
+}
+
 // Shutdown performs a final save under write lock to guarantee all modifications
 // are persisted. Call during graceful shutdown after background goroutines stop.
 func (db *DB) Shutdown() error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
-	return db.saveUnderLock()
+
+	err := db.saveUnderLock()
+	if err != nil || db.backup == nil {
+		return err
+	}
+	// Synchronous final upload so the last state is durably mirrored before exit.
+	if data, marshalErr := json.Marshal(db.data); marshalErr == nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if uploadErr := db.backup.UploadDB(ctx, db.path, data); uploadErr != nil {
+			log.Printf("[Backup] final upload failed: %v", uploadErr)
+		}
+	}
+	return err
 }
 
 // saveUnderLock marshals and writes while caller holds the write lock.
@@ -141,7 +196,12 @@ func (db *DB) save() error {
 	}
 	tmp.Close()
 
-	return os.Rename(tmpPath, db.path)
+	if err := os.Rename(tmpPath, db.path); err != nil {
+		return err
+	}
+	// Mirror the freshly-written state to the durable backup.
+	db.triggerBackup(data)
+	return nil
 }
 
 func generateID(prefix string) string {

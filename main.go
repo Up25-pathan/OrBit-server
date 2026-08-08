@@ -23,12 +23,22 @@ import (
 )
 
 func main() {
+	// Restore the database and persisted secrets from durable backup BEFORE
+	// config.Load() reads (or regenerates) the secrets and db.New() loads the
+	// data. This heals Render's ephemeral filesystem after a restart/redeploy:
+	// friendships, project memberships and relayed deltas all come back.
+	envCfg := config.LoadEnv()
+	if err := repository.RestoreBackupFiles(envCfg.DatabasePath, envCfg.Backup); err != nil {
+		log.Printf("[Backup] startup restore failed: %v", err)
+	}
+
 	cfg := config.Load()
 
 	db, err := repository.New(cfg.DatabasePath)
 	if err != nil {
 		log.Fatalf("database: %v", err)
 	}
+	db.SetBackup(envCfg.Backup)
 
 	// Graceful shutdown: create cancellable context for background goroutines
 	ctx, cancel := context.WithCancel(context.Background())
