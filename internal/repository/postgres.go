@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -24,10 +25,21 @@ type pgStore struct {
 }
 
 func newPgStore(connString string) (*pgStore, error) {
+	cfg, err := pgxpool.ParseConfig(connString)
+	if err != nil {
+		return nil, fmt.Errorf("parse DATABASE_URL: %w", err)
+	}
+	// Prefer IPv4 addresses when the hostname provides them. Managed Postgres
+	// direct hosts (Supabase, ...) resolve to IPv6-only, but platforms like
+	// Render have no IPv6 route, so deployments must connect through the
+	// IPv4-capable pooler. If a host has no IPv4 record at all, fall back to
+	// whatever DNS returned (keeps local IPv6-capable testing working).
+	cfg.ConnConfig.LookupFunc = ipv4PreferredLookup
+
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	pool, err := pgxpool.New(ctx, connString)
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("pgxpool.New: %w", err)
 	}
@@ -120,6 +132,27 @@ func kvRows(s *store) []kvRow {
 		{"messages", s.Messages},
 		{"signals", s.Signals},
 	}
+}
+
+// ipv4PreferredLookup resolves a host to IP strings, preferring IPv4 addresses
+// when DNS provides them and falling back to all results (typically IPv6) when
+// it does not. pgconn calls this instead of the default resolver and dials the
+// returned literals, so this is the right place to steer address families.
+func ipv4PreferredLookup(ctx context.Context, host string) ([]string, error) {
+	addrs, err := net.DefaultResolver.LookupHost(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	var v4 []string
+	for _, a := range addrs {
+		if ip := net.ParseIP(a); ip != nil && ip.To4() != nil {
+			v4 = append(v4, a)
+		}
+	}
+	if len(v4) > 0 {
+		return v4, nil
+	}
+	return addrs, nil
 }
 
 func unmarshalKey(key string, data []byte, s *store) error {
