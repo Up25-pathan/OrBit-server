@@ -108,18 +108,25 @@ func main() {
 	signalingHandler := handlers.NewSignalingHandler(db)
 
 	r := chi.NewRouter()
+	r.Use(corsMiddleware)
+
+	// Ultra-lightweight, silent health endpoints for keep-alive pings (UptimeRobot / Cron)
+	// Executed BEFORE chimw.Logger so keep-alive pings produce ZERO log noise in server.log.
+	healthHandler := func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("ok"))
+	}
+	r.Get("/health", healthHandler)
+	r.Head("/health", healthHandler)
+	r.Get("/api/v1/health", healthHandler)
+	r.Head("/api/v1/health", healthHandler)
+
 	r.Use(chimw.Logger)
 	r.Use(chimw.Recoverer)
-	r.Use(corsMiddleware)
 	r.Use(middleware.RateLimit)
 
 	r.Route("/api/v1", func(r chi.Router) {
-		// Health check — used by keep-alive ping to prevent Render free tier spin-down
-		r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusOK)
-			w.Write([]byte("ok"))
-		})
-
 		// Audit Fix #42: Add updater endpoint handler returning current version info
 		r.Get("/updater/latest.json", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
