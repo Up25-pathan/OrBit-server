@@ -67,15 +67,18 @@ func New(path string) (*DB, error) {
 	if conn := os.Getenv("DATABASE_URL"); conn != "" {
 		pg, err := newPgStore(conn)
 		if err != nil {
-			return nil, fmt.Errorf("postgres: %w", err)
+			log.Printf("[db] WARNING: Postgres connection failed (%v). Falling back to local store to maintain server uptime.", err)
+		} else {
+			db.pg = pg
+			if err := db.load(); err != nil {
+				log.Printf("[db] WARNING: Failed to load from Postgres (%v). Falling back to local store.", err)
+				pg.close()
+				db.pg = nil
+			} else {
+				log.Printf("[db] Postgres persistence enabled")
+				return db, nil
+			}
 		}
-		db.pg = pg
-		if err := db.load(); err != nil {
-			pg.close()
-			return nil, fmt.Errorf("load db: %w", err)
-		}
-		log.Printf("[db] Postgres persistence enabled")
-		return db, nil
 	}
 
 	if err := db.load(); err != nil {
