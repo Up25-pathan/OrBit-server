@@ -14,6 +14,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	s3 "github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/smithy-go"
 	"github.com/orbit/control-server/internal/config"
 )
 
@@ -62,6 +63,13 @@ func (b *BackupSink) Download(ctx context.Context, key string) ([]byte, bool, er
 		var noSuchKey *types.NoSuchKey
 		var notFound *types.NotFound
 		if errors.As(err, &noSuchKey) || errors.As(err, &notFound) {
+			return nil, false, nil
+		}
+		// Some S3-compatible providers (B2, Supabase, ...) return a generic
+		// APIError with the code in the message rather than a typed error.
+		var apiErr smithy.APIError
+		if errors.As(err, &apiErr) &&
+			(apiErr.ErrorCode() == "NoSuchKey" || apiErr.ErrorCode() == "NotFound") {
 			return nil, false, nil
 		}
 		return nil, false, err
