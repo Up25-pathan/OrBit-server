@@ -45,11 +45,11 @@ func main() {
 	// Encrypted Cloud Relay: Start background sweeper to purge expired delta blobs (7-day TTL)
 	db.StartDeltaSweeperWithCtx(ctx)
 
-	// Presence Heartbeat: Mark users offline after 90s of inactivity
+	// Presence Heartbeat: Mark users offline after inactivity
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		ticker := time.NewTicker(60 * time.Second)
+		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
 		for {
 			select {
