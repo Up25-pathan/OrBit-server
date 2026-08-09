@@ -10,10 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
-	"sync/atomic"
 	"time"
 
-	"github.com/orbit/control-server/internal/config"
 	"github.com/orbit/control-server/internal/models"
 )
 
@@ -45,9 +43,7 @@ type DB struct {
 	mu   sync.RWMutex
 	path string
 	data *store
-
-	backup          *BackupSink
-	backupUploading atomic.Bool
+	pg   *pgStore // non-nil => Postgres persistence (DATABASE_URL set)
 }
 
 func New(path string) (*DB, error) {
@@ -64,6 +60,24 @@ func New(path string) (*DB, error) {
 		Messages:       make(map[string][]*models.ChatMessage),
 		Signals:        []Signal{},
 	}}
+
+	// Postgres mode is durable across restarts and redeploys (Render's local
+	// filesystem is ephemeral). Without DATABASE_URL the original JSON file
+	// store is used, so local development is unchanged.
+	if conn := os.Getenv("DATABASE_URL"); conn != "" {
+		pg, err := newPgStore(conn)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: %w", err)
+		}
+		db.pg = pg
+		if err := db.load(); err != nil {
+			pg.close()
+			return nil, fmt.Errorf("load db: %w", err)
+		}
+		log.Printf("[db] Postgres persistence enabled")
+		return db, nil
+	}
+
 	if err := db.load(); err != nil {
 		return nil, fmt.Errorf("load db: %w", err)
 	}
@@ -75,44 +89,13 @@ func New(path string) (*DB, error) {
 }
 
 func (db *DB) Close() error {
-	return db.save()
-}
-
-// SetBackup attaches the durable backup sink. No-op when the sink can't be built
-// (or backup isn't configured), so local development is unaffected.
-func (db *DB) SetBackup(cfg config.BackupConfig) {
-	if !cfg.Enabled {
-		return
+	if err := db.save(); err != nil {
+		return err
 	}
-	sink, err := NewBackupSink(cfg)
-	if err != nil {
-		log.Printf("[Backup] failed to attach backup sink: %v", err)
-		return
+	if db.pg != nil {
+		db.pg.close()
 	}
-	db.backup = sink
-	log.Printf("[Backup] backup sink attached (bucket=%s)", cfg.Bucket)
-}
-
-// triggerBackup uploads the latest state asynchronously. At most one upload is
-// in flight at a time; if saves outpace uploads, intermediate versions are
-// skipped and the newest state is uploaded on the next save.
-func (db *DB) triggerBackup(data []byte) {
-	if db.backup == nil {
-		return
-	}
-	if !db.backupUploading.CompareAndSwap(false, true) {
-		return
-	}
-	backup := db.backup
-	dbPath := db.path
-	go func() {
-		defer db.backupUploading.Store(false)
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		if err := backup.UploadDB(ctx, dbPath, data); err != nil {
-			log.Printf("[Backup] upload failed (will retry on next save): %v", err)
-		}
-	}()
+	return nil
 }
 
 // Shutdown performs a final save under write lock to guarantee all modifications
@@ -120,25 +103,15 @@ func (db *DB) triggerBackup(data []byte) {
 func (db *DB) Shutdown() error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
-
-	err := db.saveUnderLock()
-	if err != nil || db.backup == nil {
-		return err
-	}
-	// Synchronous final upload so the last state is durably mirrored before exit.
-	if data, marshalErr := json.Marshal(db.data); marshalErr == nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		if uploadErr := db.backup.UploadDB(ctx, db.path, data); uploadErr != nil {
-			log.Printf("[Backup] final upload failed: %v", uploadErr)
-		}
-	}
-	return err
+	return db.saveUnderLock()
 }
 
-// saveUnderLock marshals and writes while caller holds the write lock.
-// Used only by Shutdown to ensure a consistent final snapshot.
+// saveUnderLock persists the whole store while the caller holds the write lock,
+// so the snapshot cannot interleave with a concurrent mutation.
 func (db *DB) saveUnderLock() error {
+	if db.pg != nil {
+		return db.pg.save(db.data)
+	}
 	data, err := json.MarshalIndent(db.data, "", "  ")
 	if err != nil { return err }
 	dir := filepath.Dir(db.path)
@@ -158,6 +131,9 @@ func (db *DB) saveUnderLock() error {
 }
 
 func (db *DB) load() error {
+	if db.pg != nil {
+		return db.pg.load(db.data)
+	}
 	data, err := os.ReadFile(db.path)
 	if err != nil {
 		if os.IsNotExist(err) { return nil }
@@ -167,41 +143,15 @@ func (db *DB) load() error {
 }
 
 func (db *DB) save() error {
-	// Hold the write lock across marshalling AND the atomic file write so a
-	// concurrent mutation cannot interleave between the snapshot and the rename
+	// Hold the write lock across marshalling AND the atomic write so a
+	// concurrent mutation cannot interleave between the snapshot and the write
 	// and get lost. Previously this marshalled under RLock, released the lock,
 	// then wrote — a writer that committed in between could be overwritten by
 	// this stale snapshot (lost update). Every caller must call save() WITHOUT
 	// holding the lock.
 	db.mu.Lock()
 	defer db.mu.Unlock()
-
-	data, err := json.MarshalIndent(db.data, "", "  ")
-	if err != nil { return err }
-
-	dir := filepath.Dir(db.path)
-	tmp, err := os.CreateTemp(dir, "orbit-*.tmp")
-	if err != nil { return err }
-	tmpPath := tmp.Name()
-
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		os.Remove(tmpPath)
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		os.Remove(tmpPath)
-		return err
-	}
-	tmp.Close()
-
-	if err := os.Rename(tmpPath, db.path); err != nil {
-		return err
-	}
-	// Mirror the freshly-written state to the durable backup.
-	db.triggerBackup(data)
-	return nil
+	return db.saveUnderLock()
 }
 
 func generateID(prefix string) string {

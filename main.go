@@ -23,22 +23,20 @@ import (
 )
 
 func main() {
-	// Restore the database and persisted secrets from durable backup BEFORE
-	// config.Load() reads (or regenerates) the secrets and db.New() loads the
-	// data. This heals Render's ephemeral filesystem after a restart/redeploy:
-	// friendships, project memberships and relayed deltas all come back.
-	envCfg := config.LoadEnv()
-	if err := repository.RestoreBackupFiles(envCfg.DatabasePath, envCfg.Backup); err != nil {
-		log.Printf("[Backup] startup restore failed: %v", err)
-	}
-
 	cfg := config.Load()
 
+	// DB loads from Postgres when DATABASE_URL is set (durable across Render
+	// restarts/redeploys), otherwise from the local JSON file.
 	db, err := repository.New(cfg.DatabasePath)
 	if err != nil {
 		log.Fatalf("database: %v", err)
 	}
-	db.SetBackup(envCfg.Backup)
+
+	// Secrets are persisted durably (Postgres kv table in production, files in
+	// local dev) so sessions and invite tokens survive restarts. The env vars
+	// ORBIT_JWT_SECRET / ORBIT_INVITE_SALT still take precedence when set.
+	jwtSecret := db.GetOrCreateSecret("jwt", 32)
+	inviteSalt := db.GetOrCreateSecret("invite", 16)
 
 	// Graceful shutdown: create cancellable context for background goroutines
 	ctx, cancel := context.WithCancel(context.Background())
@@ -103,10 +101,10 @@ func main() {
 	validator := license.NewWebsiteValidator(cfg.WebsiteURL, cfg.ServerSecret)
 	log.Printf("[License Authority] Verifying licenses against Website Server at %s", cfg.WebsiteURL)
 
-	authHandler := handlers.NewAuthHandler(db, validator, cfg.JWTSecret, cfg.JWTExpiry)
+	authHandler := handlers.NewAuthHandler(db, validator, jwtSecret, cfg.JWTExpiry)
 	userHandler := handlers.NewUserHandler(db)
 	friendHandler := handlers.NewFriendHandler(db)
-	projectHandler := handlers.NewProjectHandler(db, cfg.InviteSalt)
+	projectHandler := handlers.NewProjectHandler(db, inviteSalt)
 	signalingHandler := handlers.NewSignalingHandler(db)
 
 	r := chi.NewRouter()
@@ -132,7 +130,7 @@ func main() {
 		r.Post("/auth/license", authHandler.AuthenticateKey)
 
 		r.Group(func(r chi.Router) {
-			r.Use(middleware.AuthMiddleware(cfg.JWTSecret))
+			r.Use(middleware.AuthMiddleware(jwtSecret))
 
 			r.Get("/profile", userHandler.GetProfile)
 			r.Put("/profile", userHandler.UpdateProfile)
