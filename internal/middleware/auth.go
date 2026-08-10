@@ -81,7 +81,7 @@ type tokenError struct{ msg string }
 
 func (e *tokenError) Error() string { return e.msg }
 
-func AuthMiddleware(jwtSecret string) func(http.Handler) http.Handler {
+func AuthMiddleware(jwtSecret string, isValidUser func(string) bool) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			auth := r.Header.Get("Authorization")
@@ -94,6 +94,13 @@ func AuthMiddleware(jwtSecret string) func(http.Handler) http.Handler {
 			claims, err := VerifyToken(tokenStr, jwtSecret)
 			if err != nil {
 				http.Error(w, `{"error":"invalid token"}`, http.StatusUnauthorized)
+				return
+			}
+
+			// Security Audit Fix: Ensure the user still exists in the database
+			// rather than solely relying on the 72-hour JWT expiry.
+			if isValidUser != nil && !isValidUser(claims.Sub) {
+				http.Error(w, `{"error":"user deactivated or not found"}`, http.StatusUnauthorized)
 				return
 			}
 

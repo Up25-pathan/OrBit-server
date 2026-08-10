@@ -29,12 +29,15 @@ func newPgStore(connString string) (*pgStore, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse DATABASE_URL: %w", err)
 	}
-	// Prefer IPv4 addresses when the hostname provides them. Managed Postgres
-	// direct hosts (Supabase, ...) resolve to IPv6-only, but platforms like
-	// Render have no IPv6 route, so deployments must connect through the
-	// IPv4-capable pooler. If a host has no IPv4 record at all, fall back to
-	// whatever DNS returned (keeps local IPv6-capable testing working).
+	// Prefer IPv4 addresses when the hostname provides them.
 	cfg.ConnConfig.LookupFunc = ipv4PreferredLookup
+	
+	// If connecting to a transaction pooler (e.g. Supabase port 6543), prepared statements will fail.
+	// We force Exec mode to disable prepared statements automatically so the user doesn't have to
+	// worry about appending obscure ?default_query_exec_mode=exec flags to their Render config.
+	if cfg.ConnConfig.Port == 6543 {
+		cfg.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeExec
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

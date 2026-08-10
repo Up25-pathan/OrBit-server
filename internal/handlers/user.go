@@ -159,3 +159,57 @@ func (h *UserHandler) GetPulse(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, pulse)
 }
+
+func getDMChannel(id1, id2 string) string {
+	if id1 < id2 {
+		return "dm:" + id1 + ":" + id2
+	}
+	return "dm:" + id2 + ":" + id1
+}
+
+func (h *UserHandler) SendDirectMessage(w http.ResponseWriter, r *http.Request) {
+	userID := middleware.GetUserID(r)
+	if userID == "" { writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"}); return }
+
+	targetID := chi.URLParam(r, "id")
+	if targetID == "" { writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target id required"}); return }
+
+	r.Body = http.MaxBytesReader(w, r.Body, 1024*1024)
+	var req models.SendMessageRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"}); return
+	}
+	if req.Text == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "text is required"}); return
+	}
+
+	dmChannel := getDMChannel(userID, targetID)
+	msg, err := h.db.SaveMessage(dmChannel, userID, req.Text)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()}); return
+	}
+
+	writeJSON(w, http.StatusCreated, msg)
+}
+
+func (h *UserHandler) GetDirectMessages(w http.ResponseWriter, r *http.Request) {
+	userID := middleware.GetUserID(r)
+	if userID == "" { writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"}); return }
+
+	targetID := chi.URLParam(r, "id")
+	if targetID == "" { writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target id required"}); return }
+
+	offset := 0
+	limit := 100 // default limit
+	
+	dmChannel := getDMChannel(userID, targetID)
+	msgs, err := h.db.GetMessages(dmChannel, offset, limit)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()}); return
+	}
+	if msgs == nil {
+		msgs = []models.ChatMessage{}
+	}
+
+	writeJSON(w, http.StatusOK, msgs)
+}

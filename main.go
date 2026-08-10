@@ -108,6 +108,7 @@ func main() {
 	signalingHandler := handlers.NewSignalingHandler(db)
 
 	r := chi.NewRouter()
+	r.Use(middleware.RateLimit)
 	r.Use(corsMiddleware)
 	r.Use(func(next http.Handler) http.Handler {
 		logger := chimw.Logger(next)
@@ -121,7 +122,6 @@ func main() {
 		})
 	})
 	r.Use(chimw.Recoverer)
-	r.Use(middleware.RateLimit)
 
 	// Ultra-lightweight health endpoints for keep-alive pings (UptimeRobot / Cron)
 	healthHandler := func(w http.ResponseWriter, r *http.Request) {
@@ -145,13 +145,18 @@ func main() {
 		r.Post("/auth/license", authHandler.AuthenticateKey)
 
 		r.Group(func(r chi.Router) {
-			r.Use(middleware.AuthMiddleware(jwtSecret))
+			r.Use(middleware.AuthMiddleware(jwtSecret, func(userID string) bool {
+				user, err := db.GetUserByID(userID)
+				return err == nil && user != nil
+			}))
 
 			r.Get("/profile", userHandler.GetProfile)
 			r.Put("/profile", userHandler.UpdateProfile)
 			r.Put("/profile/key", userHandler.UpdatePublicKey)
 			r.Put("/users/presence", userHandler.UpdatePresence)
 			r.Get("/users/{id}/pulse", userHandler.GetPulse)
+			r.Get("/users/{id}/messages", userHandler.GetDirectMessages)
+			r.Post("/users/{id}/messages", userHandler.SendDirectMessage)
 
 			r.Get("/users/search", userHandler.SearchUsers)
 			r.Get("/users/{id}", func(w http.ResponseWriter, r *http.Request) {

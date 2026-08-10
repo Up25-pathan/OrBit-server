@@ -79,7 +79,7 @@ func (rl *rateLimiter) allow(key string, maxTokens int, rate time.Duration) bool
 		refill := int(elapsed / b.rate)
 		if refill > 0 {
 			b.tokens = min(b.tokens+(refill*100), b.maxTokens)
-			b.refillAt = now
+			b.refillAt = b.refillAt.Add(time.Duration(refill) * b.rate)
 		}
 	}
 
@@ -109,8 +109,12 @@ func RateLimit(next http.Handler) http.Handler {
 		ip := getIP(r)
 		path := r.URL.Path
 
-		// Authenticated requests (active app user with JWT token): bypass IP rate limiter
+		// Authenticated requests (active app user with JWT token): apply high-capacity limit rather than complete bypass
 		if r.Header.Get("Authorization") != "" {
+			if !limiter.allow("auth_user:"+ip, 100000, 100*time.Millisecond) {
+				http.Error(w, `{"error":"rate limit exceeded"}`, http.StatusTooManyRequests)
+				return
+			}
 			next.ServeHTTP(w, r)
 			return
 		}

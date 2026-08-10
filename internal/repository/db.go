@@ -66,6 +66,11 @@ func New(path string) (*DB, error) {
 	// filesystem is ephemeral). Without DATABASE_URL the original JSON file
 	// store is used, so local development is unchanged.
 	if conn := os.Getenv("DATABASE_URL"); conn != "" {
+		// Render deployment fix: Render does not support IPv6 outbound.
+		// Supabase requires IPv6 on port 5432, so we intercept and force 
+		// the IPv4 Transaction Pooler on port 6543.
+		conn = strings.Replace(conn, ":5432", ":6543", 1)
+		
 		pg, err := newPgStore(conn)
 		if err != nil {
 			log.Printf("[db] WARNING: Postgres connection failed (%v). Falling back to local store to maintain server uptime.", err)
