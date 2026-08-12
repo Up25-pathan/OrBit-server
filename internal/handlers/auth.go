@@ -37,6 +37,11 @@ func (h *AuthHandler) AuthenticateKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if req.MachineID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "machineId is required"})
+		return
+	}
+
 	// Validate the license key against the authority (mock today, website later)
 	info, err := h.validator.Validate(req.LicenseKey)
 	if err != nil {
@@ -45,8 +50,12 @@ func (h *AuthHandler) AuthenticateKey(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Upsert the user — creates if new, updates metadata if existing
-	user, err := h.db.UpsertUser(info.UserID, info.Name, info.Email, info.PlanTier, req.LicenseKey)
+	user, err := h.db.UpsertUser(info.UserID, info.Name, info.Email, info.PlanTier, req.LicenseKey, req.MachineID)
 	if err != nil {
+		if err.Error() == "license is already bound to another device" {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "License is already bound to another device."})
+			return
+		}
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create user session"})
 		return
 	}

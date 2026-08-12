@@ -27,7 +27,7 @@ type store struct {
 	Deltas         map[string][]models.ProjectDelta   `json:"deltas"`
 	ActivityLogs   []models.ActivityLog               `json:"activityLogs"`
 	Messages       map[string][]*models.ChatMessage   `json:"messages"`
-	Signals        []Signal                           `json:"signals"`
+	Signals        []Signal                           `json:"-"`
 }
 
 type Signal struct {
@@ -174,14 +174,21 @@ func generateID(prefix string) string {
 
 // UpsertUser creates a new user or updates an existing one based on the stable UserID
 // from the license validator. No passwords. No bcrypt.
-func (db *DB) UpsertUser(id, name, email, planTier, licenseKey string) (*models.User, error) {
+func (db *DB) UpsertUser(id, name, email, planTier, licenseKey, machineID string) (*models.User, error) {
 	db.mu.Lock()
 	now := time.Now().UTC()
 	existing := db.data.Users[id]
 	if existing != nil {
+		if existing.MachineID != "" && existing.MachineID != machineID {
+			db.mu.Unlock()
+			return nil, fmt.Errorf("license is already bound to another device")
+		}
 		existing.DisplayName = name
 		existing.Email = email
 		existing.PlanTier = planTier
+		if existing.MachineID == "" {
+			existing.MachineID = machineID
+		}
 		existing.UpdatedAt = now
 	} else {
 		existing = &models.User{
@@ -191,6 +198,7 @@ func (db *DB) UpsertUser(id, name, email, planTier, licenseKey string) (*models.
 			PlanTier:    planTier,
 			Bio:         "",
 			Status:      "online",
+			MachineID:   machineID,
 			CreatedAt:   now,
 			UpdatedAt:   now,
 		}
@@ -526,14 +534,34 @@ func (db *DB) AckDelta(projectID, deltaID, userID string) error {
 		// every CURRENT member EXCEPT the author. Without this, a delta could
 		// never reach memberCount (the client never acks its own pushes) and the
 		// relay blob would accumulate until the 7-day sweep.
-		neededAcks := memberCount
+		activeMembers := 0
+		for range members {
+			// A member is only considered active if they haven't explicitly left
+			// Although currently orbit doesn't have a 'leave' status, we just count them
+			activeMembers++
+		}
+		
+		neededAcks := activeMembers
 		for _, m := range members {
 			if m.UserID == d.AuthorID {
 				neededAcks--
 				break
 			}
 		}
-		if len(d.AckedBy) < neededAcks {
+		
+		// If neededAcks drops to 0 (e.g. only the author is in the project), we can drop it.
+		// Also count how many valid acks we currently have from ACTIVE members.
+		validAcks := 0
+		for _, ackUserID := range d.AckedBy {
+			for _, m := range members {
+				if m.UserID == ackUserID {
+					validAcks++
+					break
+				}
+			}
+		}
+
+		if neededAcks > 0 && validAcks < neededAcks {
 			kept = append(kept, d)
 		} else {
 			// All required peers acked — drop the blob entirely
@@ -555,14 +583,14 @@ func (db *DB) AckDelta(projectID, deltaID, userID string) error {
 	return db.save()
 }
 
-func (db *DB) GetDeltas(projectID string, since time.Time) ([]models.ProjectDelta, error) {
+func (db *DB) GetDeltas(projectID string, since time.Time, userID string) ([]models.ProjectDelta, error) {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
 	all := db.data.Deltas[projectID]
 	var result []models.ProjectDelta
 	for _, d := range all {
-		if d.CreatedAt.After(since) {
+		if d.CreatedAt.After(since) && !sliceContains(d.AckedBy, userID) {
 			u := db.data.Users[d.AuthorID]
 			if u != nil {
 				d.Author = models.PublicUser{

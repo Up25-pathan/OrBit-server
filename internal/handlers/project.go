@@ -38,6 +38,23 @@ func (h *ProjectHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Name == "" { writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name is required"}); return }
 
+	user, err := h.db.GetUserByID(userID)
+	if err != nil || user == nil { writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "user not found"}); return }
+
+	if user.PlanTier == "free" {
+		projects, _ := h.db.ListProjectsForUser(userID)
+		var ownedCount int
+		for _, p := range projects {
+			if p.OwnerID == userID {
+				ownedCount++
+			}
+		}
+		if ownedCount >= 1 {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "Free tier is limited to 1 owned project. Upgrade to Pro for unlimited projects."})
+			return
+		}
+	}
+
 	project, err := h.db.CreateProject(req.Name, req.Language, req.Domain, userID)
 	if err != nil { writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()}); return }
 
@@ -76,14 +93,25 @@ func (h *ProjectHandler) Invite(w http.ResponseWriter, r *http.Request) {
 	if userID == "" { writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"}); return }
 
 	projectID := chi.URLParam(r, "id")
-	if !h.db.IsProjectMember(projectID, userID) {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "not a member"}); return
+	if !h.db.IsProjectOwner(projectID, userID) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "only owners can invite members"}); return
 	}
 
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
 	var req models.InviteMemberRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"}); return
+	}
+
+	user, err := h.db.GetUserByID(userID)
+	if err != nil || user == nil { writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "user not found"}); return }
+
+	if user.PlanTier == "free" {
+		members, _ := h.db.GetProjectMembers(projectID)
+		if len(members) >= 3 {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "Free tier is limited to 2 peers per project (3 members total)."})
+			return
+		}
 	}
 
 	if err := h.db.InviteMember(projectID, req.UserID); err != nil {
@@ -99,8 +127,8 @@ func (h *ProjectHandler) GenerateToken(w http.ResponseWriter, r *http.Request) {
 	if userID == "" { writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"}); return }
 
 	projectID := chi.URLParam(r, "id")
-	if !h.db.IsProjectMember(projectID, userID) {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "not a member"}); return
+	if !h.db.IsProjectOwner(projectID, userID) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "only owners can generate invite tokens"}); return
 	}
 
 	hash := sha256.Sum256([]byte(projectID + h.inviteSalt))
@@ -132,6 +160,20 @@ func (h *ProjectHandler) JoinByToken(w http.ResponseWriter, r *http.Request) {
 	expectedPrefix := fmt.Sprintf("%x", expectedHash[:8])
 	if parts[2] != expectedPrefix {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "invite token signature verification failed"}); return
+	}
+
+	project, err := h.db.GetProject(projectID)
+	if err != nil || project == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "project not found"}); return
+	}
+
+	owner, _ := h.db.GetUserByID(project.OwnerID)
+	if owner != nil && owner.PlanTier == "free" {
+		members, _ := h.db.GetProjectMembers(projectID)
+		if len(members) >= 3 {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "The project owner is on the Free tier, which is limited to 2 peers per project (3 members total)."})
+			return
+		}
 	}
 
 	if err := h.db.InviteMember(projectID, userID); err != nil {
@@ -232,7 +274,7 @@ func (h *ProjectHandler) PullDeltas(w http.ResponseWriter, r *http.Request) {
 		since = parsed
 	}
 
-	deltas, err := h.db.GetDeltas(projectID, since)
+	deltas, err := h.db.GetDeltas(projectID, since, userID)
 	if err != nil { writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()}); return }
 	if deltas == nil { deltas = []models.ProjectDelta{} }
 
