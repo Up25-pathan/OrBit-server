@@ -45,7 +45,7 @@ func (h *AuthHandler) AuthenticateKey(w http.ResponseWriter, r *http.Request) {
 	// Validate the license key against the authority (mock today, website later)
 	info, err := h.validator.Validate(req.LicenseKey)
 	if err != nil {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid license key"})
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
 		return
 	}
 
