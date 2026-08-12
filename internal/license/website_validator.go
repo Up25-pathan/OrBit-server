@@ -60,12 +60,11 @@ func (w *WebsiteValidator) Validate(key string) (*LicenseInfo, error) {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("license verification failed with status %d", resp.StatusCode)
-	}
-
 	var data webVerifyResponse
 	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("license verification failed with status %d", resp.StatusCode)
+		}
 		return nil, fmt.Errorf("failed to parse verification response: %w", err)
 	}
 
