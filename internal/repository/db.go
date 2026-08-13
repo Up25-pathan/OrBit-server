@@ -27,7 +27,7 @@ type store struct {
 	Deltas         map[string][]models.ProjectDelta   `json:"deltas"`
 	ActivityLogs   []models.ActivityLog               `json:"activityLogs"`
 	Messages       map[string][]*models.ChatMessage   `json:"messages"`
-	Signals        []Signal                           `json:"-"`
+	Signals        []Signal                           `json:"signals"`
 }
 
 type Signal struct {
@@ -65,7 +65,7 @@ func New(path string) (*DB, error) {
 	// Postgres mode is durable across restarts and redeploys (Render's local
 	// filesystem is ephemeral). Without DATABASE_URL the original JSON file
 	// store is used, so local development is unchanged.
-	if conn := os.Getenv("DATABASE_URL"); conn != "" {
+	if conn := strings.TrimSpace(os.Getenv("DATABASE_URL")); conn != "" {
 		// Render deployment fix: Render does not support IPv6 outbound.
 		// Supabase requires IPv6 on port 5432, so we intercept and force 
 		// the IPv4 Transaction Pooler on port 6543.

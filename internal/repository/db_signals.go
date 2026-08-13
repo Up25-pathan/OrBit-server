@@ -43,7 +43,7 @@ func (db *DB) SaveSignal(projectID, fromPeer, toPeer, signalType, payload string
 	db.data.Signals = kept
 	db.mu.Unlock()
 
-	return nil
+	return db.save()
 }
 
 func (db *DB) GetPendingSignalsForPeer(projectID, toPeer string) ([]Signal, error) {

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -25,6 +26,7 @@ type pgStore struct {
 }
 
 func newPgStore(connString string) (*pgStore, error) {
+	connString = strings.TrimSpace(connString)
 	cfg, err := pgxpool.ParseConfig(connString)
 	if err != nil {
 		return nil, fmt.Errorf("parse DATABASE_URL: %w", err)

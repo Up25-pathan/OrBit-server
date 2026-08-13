@@ -125,8 +125,8 @@ func (h *SignalingHandler) GetSignals(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Signals are cleaned up by the TTL sweeper, not on read.
-	// This prevents signal loss if the client fails to process them.
+	// Clear pending signals for this peer once read so they are not re-processed
+	_ = h.db.ClearSignalsForPeer(projectID, toPeer)
 
 	writeJSON(w, http.StatusOK, resp)
 }
