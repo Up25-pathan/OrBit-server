@@ -70,6 +70,13 @@ func New(path string) (*DB, error) {
 		// Supabase requires IPv6 on port 5432, so we intercept and force 
 		// the IPv4 Transaction Pooler on port 6543.
 		conn = strings.Replace(conn, ":5432", ":6543", 1)
+		if !strings.Contains(conn, "sslmode=") {
+			if strings.Contains(conn, "?") {
+				conn += "&sslmode=require"
+			} else {
+				conn += "?sslmode=require"
+			}
+		}
 		
 		pg, err := newPgStore(conn)
 		if err != nil {

@@ -27,6 +27,13 @@ type pgStore struct {
 
 func newPgStore(connString string) (*pgStore, error) {
 	connString = strings.TrimSpace(connString)
+	if !strings.Contains(connString, "sslmode=") {
+		if strings.Contains(connString, "?") {
+			connString += "&sslmode=require"
+		} else {
+			connString += "?sslmode=require"
+		}
+	}
 	cfg, err := pgxpool.ParseConfig(connString)
 	if err != nil {
 		return nil, fmt.Errorf("parse DATABASE_URL: %w", err)
