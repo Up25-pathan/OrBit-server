@@ -34,12 +34,15 @@ func newPgStore(connString string) (*pgStore, error) {
 	// Prefer IPv4 addresses when the hostname provides them.
 	cfg.ConnConfig.LookupFunc = ipv4PreferredLookup
 	
-	// If connecting to a transaction pooler (e.g. Supabase port 6543), prepared statements will fail.
-	// We force Exec mode to disable prepared statements automatically so the user doesn't have to
-	// worry about appending obscure ?default_query_exec_mode=exec flags to their Render config.
-	if cfg.ConnConfig.Port == 6543 {
-		cfg.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeExec
-	}
+	// Always use Exec (simple protocol) mode for Supabase PgBouncer pooler compatibility
+	// (PgBouncer does not support prepared statements / extended query protocol).
+	cfg.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeExec
+
+	// Pool tuning for Supabase Transaction Pooler (prevents dead socket timeouts)
+	cfg.MinConns = 0
+	cfg.MaxConns = 10
+	cfg.MaxConnIdleTime = 15 * time.Second
+	cfg.MaxConnLifetime = 5 * time.Minute
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
