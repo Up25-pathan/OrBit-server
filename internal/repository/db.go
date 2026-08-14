@@ -222,11 +222,28 @@ func (db *DB) GetUserByLicenseKey(key string) (*models.User, error) {
 	defer db.mu.RUnlock()
 
 	id, ok := db.data.LicenseIndex[key]
-	if !ok { return nil, nil }
+	if !ok {
+		return nil, nil
+	}
 	user := db.data.Users[id]
-	if user == nil { return nil, nil }
+	if user == nil {
+		return nil, nil
+	}
 	u := *user
 	return &u, nil
+}
+
+// GetLicenseKeyByUserID finds the bound license key for a given user ID.
+func (db *DB) GetLicenseKeyByUserID(userID string) string {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	for k, v := range db.data.LicenseIndex {
+		if v == userID {
+			return k
+		}
+	}
+	return ""
 }
 
 func (db *DB) GetUserByID(id string) (*models.User, error) {

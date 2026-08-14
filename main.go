@@ -102,7 +102,7 @@ func main() {
 	log.Printf("[License Authority] Verifying licenses against Website Server at %s", cfg.WebsiteURL)
 
 	authHandler := handlers.NewAuthHandler(db, validator, jwtSecret, cfg.JWTExpiry)
-	userHandler := handlers.NewUserHandler(db)
+	userHandler := handlers.NewUserHandler(db, validator)
 	friendHandler := handlers.NewFriendHandler(db)
 	projectHandler := handlers.NewProjectHandler(db, inviteSalt)
 	signalingHandler := handlers.NewSignalingHandler(db)
@@ -153,6 +153,7 @@ func main() {
 			}))
 
 			r.Get("/profile", userHandler.GetProfile)
+			r.Post("/profile/sync", userHandler.SyncWebProfile)
 			r.Put("/profile", userHandler.UpdateProfile)
 			r.Put("/profile/key", userHandler.UpdatePublicKey)
 			r.Put("/users/presence", userHandler.UpdatePresence)

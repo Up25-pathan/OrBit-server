@@ -5,17 +5,19 @@ import (
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/orbit/control-server/internal/license"
 	"github.com/orbit/control-server/internal/middleware"
 	"github.com/orbit/control-server/internal/models"
 	"github.com/orbit/control-server/internal/repository"
 )
 
 type UserHandler struct {
-	db *repository.DB
+	db        *repository.DB
+	validator license.LicenseValidator
 }
 
-func NewUserHandler(db *repository.DB) *UserHandler {
-	return &UserHandler{db: db}
+func NewUserHandler(db *repository.DB, validator license.LicenseValidator) *UserHandler {
+	return &UserHandler{db: db, validator: validator}
 }
 
 func (h *UserHandler) GetProfile(w http.ResponseWriter, r *http.Request) {
@@ -36,6 +38,40 @@ func (h *UserHandler) GetProfile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, user)
+}
+
+func (h *UserHandler) SyncWebProfile(w http.ResponseWriter, r *http.Request) {
+	userID := middleware.GetUserID(r)
+	if userID == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+
+	user, err := h.db.GetUserByID(userID)
+	if err != nil || user == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "user not found"})
+		return
+	}
+
+	licenseKey := h.db.GetLicenseKeyByUserID(userID)
+	if licenseKey == "" || h.validator == nil {
+		writeJSON(w, http.StatusOK, user)
+		return
+	}
+
+	info, err := h.validator.Validate(licenseKey)
+	if err != nil || info == nil {
+		writeJSON(w, http.StatusOK, user)
+		return
+	}
+
+	updatedUser, err := h.db.UpsertUser(info.UserID, info.Name, info.Email, info.AvatarURL, info.PlanTier, licenseKey, user.MachineID)
+	if err != nil {
+		writeJSON(w, http.StatusOK, user)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, updatedUser)
 }
 
 type UpdateProfileRequest struct {
@@ -70,8 +106,8 @@ func (h *UserHandler) UpdateProfile(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bio must be 512 characters or less"})
 		return
 	}
-	if len(req.AvatarURL) > 2048 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "avatarUrl must be 2048 characters or less"})
+	if len(req.AvatarURL) > 500000 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "avatarUrl must be 500KB or less"})
 		return
 	}
 
