@@ -41,12 +41,10 @@ type Signal struct {
 }
 
 type DB struct {
-	mu           sync.RWMutex
-	path         string
-	data         *store
-	pg           *pgStore // non-nil => Postgres persistence (DATABASE_URL set)
-	pgConfigured bool
-	pgError      string
+	mu   sync.RWMutex
+	path string
+	data *store
+	pg   *pgStore // non-nil => Postgres persistence (DATABASE_URL set)
 }
 
 func New(path string) (*DB, error) {
@@ -67,28 +65,18 @@ func New(path string) (*DB, error) {
 	// Postgres mode is durable across restarts and redeploys (Render's local
 	// filesystem is ephemeral). Without DATABASE_URL the original JSON file
 	// store is used, so local development is unchanged.
-	if conn := strings.TrimSpace(os.Getenv("DATABASE_URL")); conn != "" {
-		db.pgConfigured = true
+	if conn := os.Getenv("DATABASE_URL"); conn != "" {
 		// Render deployment fix: Render does not support IPv6 outbound.
 		// Supabase requires IPv6 on port 5432, so we intercept and force 
 		// the IPv4 Transaction Pooler on port 6543.
 		conn = strings.Replace(conn, ":5432", ":6543", 1)
-		if !strings.Contains(conn, "sslmode=") {
-			if strings.Contains(conn, "?") {
-				conn += "&sslmode=require"
-			} else {
-				conn += "?sslmode=require"
-			}
-		}
 		
 		pg, err := newPgStore(conn)
 		if err != nil {
-			db.pgError = fmt.Sprintf("Postgres connection failed: %v", err)
 			log.Printf("[db] WARNING: Postgres connection failed (%v). Falling back to local store to maintain server uptime.", err)
 		} else {
 			db.pg = pg
 			if err := db.load(); err != nil {
-				db.pgError = fmt.Sprintf("Postgres load error: %v", err)
 				log.Printf("[db] WARNING: Failed to load from Postgres (%v). Falling back to local store.", err)
 				pg.close()
 				db.pg = nil
@@ -186,7 +174,7 @@ func generateID(prefix string) string {
 
 // UpsertUser creates a new user or updates an existing one based on the stable UserID
 // from the license validator. No passwords. No bcrypt.
-func (db *DB) UpsertUser(id, name, email, planTier, licenseKey, machineID string) (*models.User, error) {
+func (db *DB) UpsertUser(id, name, email, avatarURL, planTier, licenseKey, machineID string) (*models.User, error) {
 	db.mu.Lock()
 	now := time.Now().UTC()
 	existing := db.data.Users[id]
@@ -197,6 +185,9 @@ func (db *DB) UpsertUser(id, name, email, planTier, licenseKey, machineID string
 		}
 		existing.DisplayName = name
 		existing.Email = email
+		if avatarURL != "" {
+			existing.AvatarURL = avatarURL
+		}
 		existing.PlanTier = planTier
 		if existing.MachineID == "" {
 			existing.MachineID = machineID
@@ -207,6 +198,7 @@ func (db *DB) UpsertUser(id, name, email, planTier, licenseKey, machineID string
 			ID:          id,
 			DisplayName: name,
 			Email:       email,
+			AvatarURL:   avatarURL,
 			PlanTier:    planTier,
 			Bio:         "",
 			Status:      "online",
@@ -546,34 +538,14 @@ func (db *DB) AckDelta(projectID, deltaID, userID string) error {
 		// every CURRENT member EXCEPT the author. Without this, a delta could
 		// never reach memberCount (the client never acks its own pushes) and the
 		// relay blob would accumulate until the 7-day sweep.
-		activeMembers := 0
-		for range members {
-			// A member is only considered active if they haven't explicitly left
-			// Although currently orbit doesn't have a 'leave' status, we just count them
-			activeMembers++
-		}
-		
-		neededAcks := activeMembers
+		neededAcks := memberCount
 		for _, m := range members {
 			if m.UserID == d.AuthorID {
 				neededAcks--
 				break
 			}
 		}
-		
-		// If neededAcks drops to 0 (e.g. only the author is in the project), we can drop it.
-		// Also count how many valid acks we currently have from ACTIVE members.
-		validAcks := 0
-		for _, ackUserID := range d.AckedBy {
-			for _, m := range members {
-				if m.UserID == ackUserID {
-					validAcks++
-					break
-				}
-			}
-		}
-
-		if neededAcks > 0 && validAcks < neededAcks {
+		if len(d.AckedBy) < neededAcks {
 			kept = append(kept, d)
 		} else {
 			// All required peers acked — drop the blob entirely
@@ -595,14 +567,14 @@ func (db *DB) AckDelta(projectID, deltaID, userID string) error {
 	return db.save()
 }
 
-func (db *DB) GetDeltas(projectID string, since time.Time, userID string) ([]models.ProjectDelta, error) {
+func (db *DB) GetDeltas(projectID string, since time.Time) ([]models.ProjectDelta, error) {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
 	all := db.data.Deltas[projectID]
 	var result []models.ProjectDelta
 	for _, d := range all {
-		if d.CreatedAt.After(since) && !sliceContains(d.AckedBy, userID) {
+		if d.CreatedAt.After(since) {
 			u := db.data.Users[d.AuthorID]
 			if u != nil {
 				d.Author = models.PublicUser{
@@ -1008,64 +980,35 @@ func (db *DB) ActivityLogSweep() {
 }
 
 type TelemetryStats struct {
-	Engine             string `json:"engine"`
-	Connected          bool   `json:"connected"`
-	PgConfigured       bool   `json:"pgConfigured"`
-	PgError            string `json:"pgError,omitempty"`
-	ActiveUsersCount   int    `json:"activeUsersCount"`
-	OnlineUsersCount   int    `json:"onlineUsersCount"`
-	ProjectsCount      int    `json:"projectsCount"`
-	DeltaBlobsCount    int    `json:"deltaBlobsCount"`
-	DeltaSizeBytes     int64  `json:"deltaSizeBytes"`
-	WebRTCSignalsCount int    `json:"webrtcSignalsCount"`
+	UsersCount         int   `json:"usersCount"`
+	ProjectsCount      int   `json:"projectsCount"`
+	MessagesCount      int   `json:"messagesCount"`
+	LicensesCount      int   `json:"licensesCount"`
+	DeltaBlobsCount    int   `json:"deltaBlobsCount"`
+	DeltaSizeBytes     int64 `json:"deltaSizeBytes"`
+	WebRTCSignalsCount int   `json:"webrtcSignalsCount"`
 }
 
-// GetTelemetryStats gathers instant, lightweight in-memory metrics (sub-0.1ms execution time).
 func (db *DB) GetTelemetryStats() TelemetryStats {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
-	engine := "Local JSON DB"
-	connected := true
-	if db.pg != nil {
-		engine = "PostgreSQL (Supabase)"
-		connected = true
-	} else if db.pgConfigured {
-		engine = "PostgreSQL (Supabase)"
-		connected = false
-	}
-
-	activeUsers := len(db.data.Users)
-	projectsCount := len(db.data.Projects)
-	signalsCount := len(db.data.Signals)
-
-	onlineCutoff := time.Now().Add(-5 * time.Minute)
-	onlineCount := 0
-	for _, u := range db.data.Users {
-		if u.LastSeen.After(onlineCutoff) {
-			onlineCount++
-		}
-	}
-
-	deltaBlobsCount := 0
-	var deltaSizeBytes int64 = 0
+	var totalDeltas int
+	var totalBytes int64
 	for _, deltas := range db.data.Deltas {
-		deltaBlobsCount += len(deltas)
+		totalDeltas += len(deltas)
 		for _, d := range deltas {
-			deltaSizeBytes += int64(len(d.Data))
+			totalBytes += int64(len(d.Data))
 		}
 	}
 
 	return TelemetryStats{
-		Engine:             engine,
-		Connected:          connected,
-		PgConfigured:       db.pgConfigured,
-		PgError:            db.pgError,
-		ActiveUsersCount:   activeUsers,
-		OnlineUsersCount:   onlineCount,
-		ProjectsCount:      projectsCount,
-		DeltaBlobsCount:    deltaBlobsCount,
-		DeltaSizeBytes:     deltaSizeBytes,
-		WebRTCSignalsCount: signalsCount,
+		UsersCount:         len(db.data.Users),
+		ProjectsCount:      len(db.data.Projects),
+		MessagesCount:      len(db.data.Messages),
+		LicensesCount:      len(db.data.LicenseIndex),
+		DeltaBlobsCount:    totalDeltas,
+		DeltaSizeBytes:     totalBytes,
+		WebRTCSignalsCount: len(db.data.Signals),
 	}
 }

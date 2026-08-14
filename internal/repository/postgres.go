@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -26,32 +25,25 @@ type pgStore struct {
 }
 
 func newPgStore(connString string) (*pgStore, error) {
-	connString = strings.TrimSpace(connString)
-	if !strings.Contains(connString, "sslmode=") {
-		if strings.Contains(connString, "?") {
-			connString += "&sslmode=require"
-		} else {
-			connString += "?sslmode=require"
-		}
-	}
 	cfg, err := pgxpool.ParseConfig(connString)
 	if err != nil {
 		return nil, fmt.Errorf("parse DATABASE_URL: %w", err)
 	}
 	// Prefer IPv4 addresses when the hostname provides them.
 	cfg.ConnConfig.LookupFunc = ipv4PreferredLookup
-	
-	// Always use Exec (simple protocol) mode for Supabase PgBouncer pooler compatibility
-	// (PgBouncer does not support prepared statements / extended query protocol).
-	cfg.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeExec
-
-	// Pool tuning for Supabase Transaction Pooler (prevents dead socket timeouts)
-	cfg.MinConns = 0
 	cfg.MaxConns = 10
-	cfg.MaxConnIdleTime = 15 * time.Second
-	cfg.MaxConnLifetime = 5 * time.Minute
+	cfg.MinConns = 2
+	cfg.MaxConnIdleTime = 5 * time.Minute
+	cfg.MaxConnLifetime = 30 * time.Minute
+	
+	// If connecting to a transaction pooler (e.g. Supabase port 6543), prepared statements will fail.
+	// We force Exec mode to disable prepared statements automatically so the user doesn't have to
+	// worry about appending obscure ?default_query_exec_mode=exec flags to their Render config.
+	if cfg.ConnConfig.Port == 6543 {
+		cfg.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeExec
+	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
@@ -76,7 +68,7 @@ func (p *pgStore) close() {
 // load fills the (already initialized) store maps from the kv table. Keys that
 // have no row simply leave their map/slice as the zero value initialized by New.
 func (p *pgStore) load(s *store) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
 	rows, err := p.pool.Query(ctx, `SELECT key, data FROM kv`)
@@ -102,7 +94,7 @@ func (p *pgStore) load(s *store) error {
 // leave the tables half-updated. All keys are written unconditionally, keeping
 // the semantics identical to the old "rewrite the whole JSON file" save.
 func (p *pgStore) save(s *store) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
 	tx, err := p.pool.Begin(ctx)

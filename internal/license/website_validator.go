@@ -21,6 +21,7 @@ type webVerifyResponse struct {
 	Status      string `json:"status"`
 	UserID      string `json:"userId"`
 	DisplayName string `json:"displayName"`
+	AvatarURL   string `json:"avatarUrl"`
 	Email       string `json:"email"`
 	PlanTier    string `json:"planTier"`
 	Error       string `json:"error"`
@@ -60,11 +61,12 @@ func (w *WebsiteValidator) Validate(key string) (*LicenseInfo, error) {
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("license verification failed with status %d", resp.StatusCode)
+	}
+
 	var data webVerifyResponse
 	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-		if resp.StatusCode != http.StatusOK {
-			return nil, fmt.Errorf("license verification failed with status %d", resp.StatusCode)
-		}
 		return nil, fmt.Errorf("failed to parse verification response: %w", err)
 	}
 
@@ -82,9 +84,10 @@ func (w *WebsiteValidator) Validate(key string) (*LicenseInfo, error) {
 	}
 
 	return &LicenseInfo{
-		UserID:   data.UserID,
-		Name:     name,
-		Email:    data.Email,
-		PlanTier: data.PlanTier,
+		UserID:    data.UserID,
+		Name:      name,
+		Email:     data.Email,
+		AvatarURL: data.AvatarURL,
+		PlanTier:  data.PlanTier,
 	}, nil
 }

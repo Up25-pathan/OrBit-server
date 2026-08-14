@@ -45,12 +45,12 @@ func (h *AuthHandler) AuthenticateKey(w http.ResponseWriter, r *http.Request) {
 	// Validate the license key against the authority (mock today, website later)
 	info, err := h.validator.Validate(req.LicenseKey)
 	if err != nil {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid license key"})
 		return
 	}
 
 	// Upsert the user — creates if new, updates metadata if existing
-	user, err := h.db.UpsertUser(info.UserID, info.Name, info.Email, info.PlanTier, req.LicenseKey, req.MachineID)
+	user, err := h.db.UpsertUser(info.UserID, info.Name, info.Email, info.AvatarURL, info.PlanTier, req.LicenseKey, req.MachineID)
 	if err != nil {
 		if err.Error() == "license is already bound to another device" {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "License is already bound to another device."})

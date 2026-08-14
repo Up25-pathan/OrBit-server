@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"log"
 	"time"
 )
 
@@ -17,6 +18,11 @@ func (db *DB) SweepExpiredSignals(ttl time.Duration) int {
 	db.data.Signals = kept
 	db.mu.Unlock()
 
+	if swept > 0 {
+		if err := db.save(); err != nil {
+			log.Printf("[signal-sweep] save failed: %v", err)
+		}
+	}
 	return swept
 }
 
@@ -68,5 +74,5 @@ func (db *DB) ClearSignalsForPeer(projectID, toPeer string) error {
 	}
 	db.data.Signals = kept
 	db.mu.Unlock()
-	return nil
+	return db.save()
 }

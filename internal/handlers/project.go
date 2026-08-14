@@ -274,7 +274,7 @@ func (h *ProjectHandler) PullDeltas(w http.ResponseWriter, r *http.Request) {
 		since = parsed
 	}
 
-	deltas, err := h.db.GetDeltas(projectID, since, userID)
+	deltas, err := h.db.GetDeltas(projectID, since)
 	if err != nil { writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()}); return }
 	if deltas == nil { deltas = []models.ProjectDelta{} }
 
@@ -433,8 +433,8 @@ func (h *ProjectHandler) UpdateMemberPath(w http.ResponseWriter, r *http.Request
 	}
 
 	cleaned := filepath.Clean(req.Path)
-	if strings.Contains(cleaned, "..") {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "path must contain no '..' components"}); return
+	if strings.Contains(cleaned, "..") || filepath.IsAbs(cleaned) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "path must be relative and contain no '..' components"}); return
 	}
 
 	if err := h.db.UpdateMemberPath(projectID, userID, cleaned); err != nil {

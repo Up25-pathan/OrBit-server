@@ -78,7 +78,7 @@ func (rl *rateLimiter) allow(key string, maxTokens int, rate time.Duration) bool
 		elapsed := now.Sub(b.refillAt)
 		refill := int(elapsed / b.rate)
 		if refill > 0 {
-			b.tokens = min(b.tokens+refill, b.maxTokens)
+			b.tokens = min(b.tokens+(refill*100), b.maxTokens)
 			b.refillAt = b.refillAt.Add(time.Duration(refill) * b.rate)
 		}
 	}
