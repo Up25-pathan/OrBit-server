@@ -41,10 +41,12 @@ type Signal struct {
 }
 
 type DB struct {
-	mu   sync.RWMutex
-	path string
-	data *store
-	pg   *pgStore // non-nil => Postgres persistence (DATABASE_URL set)
+	mu           sync.RWMutex
+	path         string
+	data         *store
+	pg           *pgStore // non-nil => Postgres persistence (DATABASE_URL set)
+	pgConfigured bool
+	pgError      string
 }
 
 func New(path string) (*DB, error) {
@@ -66,6 +68,7 @@ func New(path string) (*DB, error) {
 	// filesystem is ephemeral). Without DATABASE_URL the original JSON file
 	// store is used, so local development is unchanged.
 	if conn := strings.TrimSpace(os.Getenv("DATABASE_URL")); conn != "" {
+		db.pgConfigured = true
 		// Render deployment fix: Render does not support IPv6 outbound.
 		// Supabase requires IPv6 on port 5432, so we intercept and force 
 		// the IPv4 Transaction Pooler on port 6543.
@@ -80,10 +83,12 @@ func New(path string) (*DB, error) {
 		
 		pg, err := newPgStore(conn)
 		if err != nil {
+			db.pgError = fmt.Sprintf("Postgres connection failed: %v", err)
 			log.Printf("[db] WARNING: Postgres connection failed (%v). Falling back to local store to maintain server uptime.", err)
 		} else {
 			db.pg = pg
 			if err := db.load(); err != nil {
+				db.pgError = fmt.Sprintf("Postgres load error: %v", err)
 				log.Printf("[db] WARNING: Failed to load from Postgres (%v). Falling back to local store.", err)
 				pg.close()
 				db.pg = nil
@@ -1005,6 +1010,8 @@ func (db *DB) ActivityLogSweep() {
 type TelemetryStats struct {
 	Engine             string `json:"engine"`
 	Connected          bool   `json:"connected"`
+	PgConfigured       bool   `json:"pgConfigured"`
+	PgError            string `json:"pgError,omitempty"`
 	ActiveUsersCount   int    `json:"activeUsersCount"`
 	OnlineUsersCount   int    `json:"onlineUsersCount"`
 	ProjectsCount      int    `json:"projectsCount"`
@@ -1019,8 +1026,13 @@ func (db *DB) GetTelemetryStats() TelemetryStats {
 	defer db.mu.RUnlock()
 
 	engine := "Local JSON DB"
+	connected := true
 	if db.pg != nil {
-		engine = "PostgreSQL"
+		engine = "PostgreSQL (Supabase)"
+		connected = true
+	} else if db.pgConfigured {
+		engine = "PostgreSQL (Supabase)"
+		connected = false
 	}
 
 	activeUsers := len(db.data.Users)
@@ -1046,7 +1058,9 @@ func (db *DB) GetTelemetryStats() TelemetryStats {
 
 	return TelemetryStats{
 		Engine:             engine,
-		Connected:          true,
+		Connected:          connected,
+		PgConfigured:       db.pgConfigured,
+		PgError:            db.pgError,
 		ActiveUsersCount:   activeUsers,
 		OnlineUsersCount:   onlineCount,
 		ProjectsCount:      projectsCount,
