@@ -106,6 +106,7 @@ func main() {
 	friendHandler := handlers.NewFriendHandler(db)
 	projectHandler := handlers.NewProjectHandler(db, inviteSalt)
 	signalingHandler := handlers.NewSignalingHandler(db)
+	telemetryHandler := handlers.NewTelemetryHandler(db)
 
 	r := chi.NewRouter()
 	r.Use(middleware.RateLimit)
@@ -114,7 +115,7 @@ func main() {
 		logger := chimw.Logger(next)
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Skip logging for health check endpoints so keep-alive pings produce 0 log noise in server.log
-			if r.URL.Path == "/health" || r.URL.Path == "/api/v1/health" {
+			if r.URL.Path == "/health" || r.URL.Path == "/api/v1/health" || r.URL.Path == "/api/v1/system/status" {
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -135,6 +136,8 @@ func main() {
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Get("/health", healthHandler)
 		r.Head("/health", healthHandler)
+		r.Get("/system/status", telemetryHandler.GetStatus)
+		r.Post("/system/sweep", telemetryHandler.TriggerSweep)
 		// Audit Fix #42: Add updater endpoint handler returning current version info
 		r.Get("/updater/latest.json", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
