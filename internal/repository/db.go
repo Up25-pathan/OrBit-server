@@ -98,8 +98,10 @@ func New(path string) (*DB, error) {
 }
 
 func (db *DB) Close() error {
-	if err := db.save(); err != nil {
-		return err
+	if db.pg == nil {
+		if err := db.save(); err != nil {
+			return err
+		}
 	}
 	if db.pg != nil {
 		db.pg.close()
@@ -110,6 +112,9 @@ func (db *DB) Close() error {
 // Shutdown performs a final save under write lock to guarantee all modifications
 // are persisted. Call during graceful shutdown after background goroutines stop.
 func (db *DB) Shutdown() error {
+	if db.pg != nil {
+		return nil
+	}
 	db.mu.Lock()
 	defer db.mu.Unlock()
 	return db.saveUnderLock()
@@ -175,6 +180,9 @@ func generateID(prefix string) string {
 // UpsertUser creates a new user or updates an existing one based on the stable UserID
 // from the license validator. No passwords. No bcrypt.
 func (db *DB) UpsertUser(id, name, email, avatarURL, planTier, licenseKey, machineID string) (*models.User, error) {
+	if db.pg != nil {
+		return db.pg.upsertUser(id, name, email, avatarURL, planTier, licenseKey, machineID)
+	}
 	db.mu.Lock()
 	now := time.Now().UTC()
 	existing := db.data.Users[id]
@@ -218,6 +226,9 @@ func (db *DB) UpsertUser(id, name, email, avatarURL, planTier, licenseKey, machi
 
 // GetUserByLicenseKey looks up a user by their license key.
 func (db *DB) GetUserByLicenseKey(key string) (*models.User, error) {
+	if db.pg != nil {
+		return db.pg.getUserByLicenseKey(key)
+	}
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
@@ -235,6 +246,9 @@ func (db *DB) GetUserByLicenseKey(key string) (*models.User, error) {
 
 // GetLicenseKeyByUserID finds the bound license key for a given user ID.
 func (db *DB) GetLicenseKeyByUserID(userID string) string {
+	if db.pg != nil {
+		return db.pg.getLicenseKeyByUserID(userID)
+	}
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
@@ -247,6 +261,9 @@ func (db *DB) GetLicenseKeyByUserID(userID string) string {
 }
 
 func (db *DB) GetUserByID(id string) (*models.User, error) {
+	if db.pg != nil {
+		return db.pg.getUserByID(id)
+	}
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
@@ -257,6 +274,9 @@ func (db *DB) GetUserByID(id string) (*models.User, error) {
 }
 
 func (db *DB) SearchUsers(query string, limit int) ([]models.UserSearchResult, error) {
+	if db.pg != nil {
+		return db.pg.searchUsers(query, limit)
+	}
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
@@ -297,6 +317,9 @@ func searchSub(s, sub string) bool {
 }
 
 func (db *DB) UpdateProfile(id, displayName, bio, avatarURL string) error {
+	if db.pg != nil {
+		return db.pg.updateProfile(id, displayName, bio, avatarURL)
+	}
 	db.mu.Lock()
 	u := db.data.Users[id]
 	if u == nil { db.mu.Unlock(); return fmt.Errorf("user not found") }
@@ -309,6 +332,18 @@ func (db *DB) UpdateProfile(id, displayName, bio, avatarURL string) error {
 }
 
 func (db *DB) UpdateStatus(id, status string) error {
+	if db.pg != nil {
+		ctx, cancel := pgCtx()
+		defer cancel()
+		ct, err := db.pg.pool.Exec(ctx, `UPDATE users SET status = $2, updated_at = $3 WHERE id = $1`, id, status, time.Now().UTC())
+		if err != nil {
+			return err
+		}
+		if ct.RowsAffected() == 0 {
+			return fmt.Errorf("user not found")
+		}
+		return nil
+	}
 	db.mu.Lock()
 	u := db.data.Users[id]
 	if u == nil { db.mu.Unlock(); return fmt.Errorf("user not found") }
@@ -318,6 +353,9 @@ func (db *DB) UpdateStatus(id, status string) error {
 }
 
 func (db *DB) UpdatePublicKey(id, fingerprint string) error {
+	if db.pg != nil {
+		return db.pg.updatePublicKey(id, fingerprint)
+	}
 	db.mu.Lock()
 	u := db.data.Users[id]
 	if u == nil { db.mu.Unlock(); return fmt.Errorf("user not found") }
@@ -327,6 +365,9 @@ func (db *DB) UpdatePublicKey(id, fingerprint string) error {
 }
 
 func (db *DB) SendFriendRequest(fromID, toID string) (*models.FriendRequest, error) {
+	if db.pg != nil {
+		return db.pg.sendFriendRequest(fromID, toID)
+	}
 	db.mu.Lock()
 	if fromID == toID { db.mu.Unlock(); return nil, fmt.Errorf("cannot send request to yourself") }
 	if db.data.Users[fromID] == nil { db.mu.Unlock(); return nil, fmt.Errorf("sender not found") }
@@ -355,6 +396,9 @@ func sliceContains(slice []string, val string) bool {
 }
 
 func (db *DB) AcceptFriendRequest(requestID, userID string) error {
+	if db.pg != nil {
+		return db.pg.acceptFriendRequest(requestID, userID)
+	}
 	db.mu.Lock()
 	for _, fr := range db.data.FriendRequests {
 		if fr.ID == requestID && fr.Status == "pending" {
@@ -375,6 +419,9 @@ func (db *DB) AcceptFriendRequest(requestID, userID string) error {
 }
 
 func (db *DB) RejectFriendRequest(requestID, userID string) error {
+	if db.pg != nil {
+		return db.pg.rejectFriendRequest(requestID, userID)
+	}
 	db.mu.Lock()
 	for _, fr := range db.data.FriendRequests {
 		if fr.ID == requestID && fr.Status == "pending" {
@@ -389,6 +436,9 @@ func (db *DB) RejectFriendRequest(requestID, userID string) error {
 }
 
 func (db *DB) GetPendingRequests(userID string) ([]models.FriendRequest, error) {
+	if db.pg != nil {
+		return db.pg.getPendingRequests(userID)
+	}
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
@@ -410,6 +460,9 @@ func (db *DB) GetPendingRequests(userID string) ([]models.FriendRequest, error) 
 }
 
 func (db *DB) GetFriends(userID string) ([]models.Friend, error) {
+	if db.pg != nil {
+		return db.pg.getFriends(userID)
+	}
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
@@ -430,6 +483,9 @@ func (db *DB) GetFriends(userID string) ([]models.Friend, error) {
 }
 
 func (db *DB) CreateProject(name, language, domain, ownerID string) (*models.Project, error) {
+	if db.pg != nil {
+		return db.pg.createProject(name, language, domain, ownerID)
+	}
 	db.mu.Lock()
 	p := &models.Project{
 		ID: generateID("prj"), Name: name, Language: language, Domain: domain, OwnerID: ownerID, CreatedAt: time.Now().UTC(),
@@ -443,6 +499,9 @@ func (db *DB) CreateProject(name, language, domain, ownerID string) (*models.Pro
 }
 
 func (db *DB) GetProject(id string) (*models.Project, error) {
+	if db.pg != nil {
+		return db.pg.getProject(id)
+	}
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
@@ -453,6 +512,9 @@ func (db *DB) GetProject(id string) (*models.Project, error) {
 }
 
 func (db *DB) ListProjectsForUser(userID string) ([]models.Project, error) {
+	if db.pg != nil {
+		return db.pg.listProjectsForUser(userID)
+	}
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
@@ -470,6 +532,9 @@ func (db *DB) ListProjectsForUser(userID string) ([]models.Project, error) {
 }
 
 func (db *DB) InviteMember(projectID, userID string) error {
+	if db.pg != nil {
+		return db.pg.inviteMember(projectID, userID)
+	}
 	db.mu.Lock()
 	if db.data.Users[userID] == nil { db.mu.Unlock(); return fmt.Errorf("user not found") }
 	members := db.data.ProjectMembers[projectID]
@@ -484,6 +549,9 @@ func (db *DB) InviteMember(projectID, userID string) error {
 }
 
 func (db *DB) GetProjectMembers(projectID string) ([]models.ProjectMember, error) {
+	if db.pg != nil {
+		return db.pg.getProjectMembers(projectID)
+	}
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
@@ -506,6 +574,9 @@ func (db *DB) GetProjectMembers(projectID string) ([]models.ProjectMember, error
 }
 
 func (db *DB) UpdateProject(p *models.Project) error {
+	if db.pg != nil {
+		return db.pg.updateProject(p)
+	}
 	db.mu.Lock()
 	existing := db.data.Projects[p.ID]
 	if existing == nil { db.mu.Unlock(); return fmt.Errorf("project not found") }
@@ -515,6 +586,9 @@ func (db *DB) UpdateProject(p *models.Project) error {
 }
 
 func (db *DB) StoreDelta(projectID, authorID, data string) (*models.ProjectDelta, error) {
+	if db.pg != nil {
+		return db.pg.storeDelta(projectID, authorID, data)
+	}
 	db.mu.Lock()
 	d := &models.ProjectDelta{
 		ID: generateID("dlt"), ProjectID: projectID,
@@ -529,6 +603,9 @@ func (db *DB) StoreDelta(projectID, authorID, data string) (*models.ProjectDelta
 // member has acked the same delta, the blob is removed from the relay so pushed
 // data is cleared once all peers are on the same update.
 func (db *DB) AckDelta(projectID, deltaID, userID string) error {
+	if db.pg != nil {
+		return db.pg.ackDelta(projectID, deltaID, userID)
+	}
 	db.mu.Lock()
 
 	deltas := db.data.Deltas[projectID]
@@ -585,6 +662,9 @@ func (db *DB) AckDelta(projectID, deltaID, userID string) error {
 }
 
 func (db *DB) GetDeltas(projectID string, since time.Time) ([]models.ProjectDelta, error) {
+	if db.pg != nil {
+		return db.pg.getDeltas(projectID, since)
+	}
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
@@ -607,6 +687,9 @@ func (db *DB) GetDeltas(projectID string, since time.Time) ([]models.ProjectDelt
 // SweepExpiredDeltas removes all encrypted relay blobs older than the TTL (7 days).
 // This is the "Rolling Window" approach from the Encrypted Cloud Relay spec.
 func (db *DB) SweepExpiredDeltas(ttl time.Duration) int {
+	if db.pg != nil {
+		return db.pg.sweepExpiredDeltas(ttl)
+	}
 	db.mu.Lock()
 	cutoff := time.Now().UTC().Add(-ttl)
 	swept := 0
@@ -665,6 +748,9 @@ func (db *DB) StartDeltaSweeperWithCtx(ctx context.Context) {
 }
 
 func (db *DB) CreateTask(projectID, title, assigneeID, creatorID string) (*models.Task, error) {
+	if db.pg != nil {
+		return db.pg.createTask(projectID, title, assigneeID, creatorID)
+	}
 	db.mu.Lock()
 	task := &models.Task{
 		ID: generateID("tsk"), ProjectID: projectID, Title: title, AssigneeID: assigneeID, CreatorID: creatorID, Status: "open", CreatedAt: time.Now().UTC(),
@@ -678,6 +764,9 @@ func (db *DB) CreateTask(projectID, title, assigneeID, creatorID string) (*model
 }
 
 func (db *DB) GetTasks(projectID string) ([]models.Task, error) {
+	if db.pg != nil {
+		return db.pg.getTasks(projectID)
+	}
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
@@ -696,6 +785,9 @@ func (db *DB) GetTasks(projectID string) ([]models.Task, error) {
 }
 
 func (db *DB) CompleteTask(projectID, taskID string) (*models.Task, error) {
+	if db.pg != nil {
+		return db.pg.completeTask(projectID, taskID)
+	}
 	db.mu.Lock()
 	tasks := db.data.Tasks[projectID]
 	for _, t := range tasks {
@@ -714,6 +806,9 @@ func (db *DB) CompleteTask(projectID, taskID string) (*models.Task, error) {
 }
 
 func (db *DB) LogActivity(userID, projectID, action string) error {
+	if db.pg != nil {
+		return db.pg.logActivity(userID, projectID, action)
+	}
 	db.mu.Lock()
 	log := models.ActivityLog{
 		ID: generateID("act"), UserID: userID, ProjectID: projectID, Action: action, CreatedAt: time.Now().UTC(),
@@ -724,6 +819,9 @@ func (db *DB) LogActivity(userID, projectID, action string) error {
 }
 
 func (db *DB) UpdatePresence(userID, activity string) error {
+	if db.pg != nil {
+		return db.pg.updatePresence(userID, activity)
+	}
 	db.mu.Lock()
 	u := db.data.Users[userID]
 	if u == nil { db.mu.Unlock(); return fmt.Errorf("user not found") }
@@ -741,6 +839,10 @@ func (db *DB) UpdatePresence(userID, activity string) error {
 // HeartbeatSweep marks all users offline, then each active client's
 // periodic presence call brings them back online.
 func (db *DB) HeartbeatSweep() {
+	if db.pg != nil {
+		db.pg.heartbeatSweep()
+		return
+	}
 	db.mu.Lock()
 	cutoff := time.Now().UTC().Add(-25 * time.Second)
 	for _, u := range db.data.Users {
@@ -756,6 +858,9 @@ func (db *DB) HeartbeatSweep() {
 }
 
 func (db *DB) GetPulse(userID string) ([]models.PulseEntry, error) {
+	if db.pg != nil {
+		return db.pg.getPulse(userID)
+	}
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
@@ -784,6 +889,9 @@ func (db *DB) GetPulse(userID string) ([]models.PulseEntry, error) {
 }
 
 func (db *DB) GetLeaderboard(projectID string) ([]models.LeaderboardEntry, error) {
+	if db.pg != nil {
+		return db.pg.getLeaderboard(projectID)
+	}
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
@@ -819,6 +927,9 @@ func (db *DB) GetLeaderboard(projectID string) ([]models.LeaderboardEntry, error
 }
 
 func (db *DB) IsProjectMember(projectID, userID string) bool {
+	if db.pg != nil {
+		return db.pg.isProjectMember(projectID, userID)
+	}
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
@@ -831,6 +942,9 @@ func (db *DB) IsProjectMember(projectID, userID string) bool {
 }
 
 func (db *DB) IsProjectOwner(projectID, userID string) bool {
+	if db.pg != nil {
+		return db.pg.isProjectOwner(projectID, userID)
+	}
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
@@ -843,6 +957,9 @@ func (db *DB) IsProjectOwner(projectID, userID string) bool {
 }
 
 func (db *DB) UpdateMemberPath(projectID, userID, path string) error {
+	if db.pg != nil {
+		return db.pg.updateMemberPath(projectID, userID, path)
+	}
 	db.mu.Lock()
 	members := db.data.ProjectMembers[projectID]
 	updated := false
@@ -863,6 +980,9 @@ func (db *DB) UpdateMemberPath(projectID, userID, path string) error {
 }
 
 func (db *DB) SaveMessage(projectID, authorID, text string) (*models.ChatMessage, error) {
+	if db.pg != nil {
+		return db.pg.saveMessage(projectID, authorID, text)
+	}
 	db.mu.Lock()
 	m := &models.ChatMessage{
 		ID:        generateID("msg"),
@@ -889,6 +1009,9 @@ func (db *DB) SaveMessage(projectID, authorID, text string) (*models.ChatMessage
 }
 
 func (db *DB) GetMessages(projectID string, offset, limit int) ([]models.ChatMessage, error) {
+	if db.pg != nil {
+		return db.pg.getMessages(projectID, offset, limit)
+	}
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
@@ -915,6 +1038,9 @@ func (db *DB) GetMessages(projectID string, offset, limit int) ([]models.ChatMes
 }
 
 func (db *DB) DeleteTask(projectID, taskID string) error {
+	if db.pg != nil {
+		return db.pg.deleteTask(projectID, taskID)
+	}
 	db.mu.Lock()
 	tasks := db.data.Tasks[projectID]
 	var kept []*models.Task
@@ -929,6 +1055,9 @@ func (db *DB) DeleteTask(projectID, taskID string) error {
 }
 
 func (db *DB) DeleteProject(projectID string) error {
+	if db.pg != nil {
+		return db.pg.deleteProject(projectID)
+	}
 	db.mu.Lock()
 	delete(db.data.Projects, projectID)
 	delete(db.data.ProjectMembers, projectID)
@@ -949,6 +1078,12 @@ func (db *DB) DeleteProject(projectID string) error {
 
 // MessageSweep deletes chat messages older than 30 days.
 func (db *DB) MessageSweep() {
+	if db.pg != nil {
+		if n := db.pg.messageSweep(); n > 0 {
+			log.Printf("[message-sweep] deleted %d expired message(s)", n)
+		}
+		return
+	}
 	db.mu.Lock()
 	cutoff := time.Now().UTC().Add(-30 * 24 * time.Hour)
 	dirty := false
@@ -975,6 +1110,12 @@ func (db *DB) MessageSweep() {
 
 // ActivityLogSweep prunes activity logs older than 90 days.
 func (db *DB) ActivityLogSweep() {
+	if db.pg != nil {
+		if n := db.pg.activityLogSweep(); n > 0 {
+			log.Printf("[activity-sweep] deleted %d expired activity log(s)", n)
+		}
+		return
+	}
 	db.mu.Lock()
 	cutoff := time.Now().UTC().Add(-90 * 24 * time.Hour)
 	var kept []models.ActivityLog
@@ -1007,6 +1148,9 @@ type TelemetryStats struct {
 }
 
 func (db *DB) GetTelemetryStats() TelemetryStats {
+	if db.pg != nil {
+		return db.pg.telemetryStats()
+	}
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 

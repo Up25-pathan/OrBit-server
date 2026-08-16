@@ -7,14 +7,16 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/orbit/control-server/internal/middleware"
 	"github.com/orbit/control-server/internal/repository"
+	"github.com/orbit/control-server/internal/websocket"
 )
 
 type SignalingHandler struct {
-	db *repository.DB
+	db   *repository.DB
+	hub  *websocket.Hub
 }
 
-func NewSignalingHandler(db *repository.DB) *SignalingHandler {
-	return &SignalingHandler{db: db}
+func NewSignalingHandler(db *repository.DB, hub *websocket.Hub) *SignalingHandler {
+	return &SignalingHandler{db: db, hub: hub}
 }
 
 type SendSignalRequest struct {
@@ -75,6 +77,15 @@ func (h *SignalingHandler) SendSignal(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to save signal"})
 		return
+	}
+
+	// Push to WebSocket if recipient is connected
+	if h.hub != nil {
+		h.hub.DeliverSignal(projectID, req.ToPeer, websocket.SignalMessage{
+			FromPeer: fromPeer,
+			Type:     req.Type,
+			Payload:  req.Payload,
+		})
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"message": "signal dispatched"})

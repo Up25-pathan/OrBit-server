@@ -20,6 +20,7 @@ import (
 	"github.com/orbit/control-server/internal/license"
 	"github.com/orbit/control-server/internal/middleware"
 	"github.com/orbit/control-server/internal/repository"
+	"github.com/orbit/control-server/internal/websocket"
 )
 
 func main() {
@@ -105,7 +106,8 @@ func main() {
 	userHandler := handlers.NewUserHandler(db, validator)
 	friendHandler := handlers.NewFriendHandler(db)
 	projectHandler := handlers.NewProjectHandler(db, inviteSalt)
-	signalingHandler := handlers.NewSignalingHandler(db)
+	wsHub := websocket.NewHub(db)
+	signalingHandler := handlers.NewSignalingHandler(db, wsHub)
 
 	r := chi.NewRouter()
 	r.Use(middleware.RateLimit)
@@ -141,6 +143,19 @@ func main() {
 		r.Get("/updater/latest.json", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			w.Write([]byte(`{"version":"0.1.0","notes":"No updates available currently.","pub_date":"2026-07-27T00:00:00Z","platforms":{"windows-x86_64":{"signature":"","url":""},"darwin-x86_64":{"signature":"","url":""},"darwin-aarch64":{"signature":"","url":""},"linux-x86_64":{"signature":"","url":""}}}`))
+		})
+
+		// TURN credentials for NAT traversal (short-lived, signed)
+		r.Get("/turn-credentials", func(w http.ResponseWriter, r *http.Request) {
+			userID := middleware.GetUserID(r)
+			if userID == "" {
+				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+				return
+			}
+			// In production, generate time-limited TURN credentials using a TURN secret
+			// For now, return static configuration - replace with actual TURN server
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"username":"orbit-user","credential":"turn-secret-change-in-production","urls":["turn:turn.orbit-sync.onrender.com:3478?transport=udp","turn:turn.orbit-sync.onrender.com:3478?transport=tcp"],"ttl":86400}`))
 		})
 
 		// License Key Authentication — single endpoint, no signup/signin
@@ -207,6 +222,7 @@ func main() {
 			// Signaling for P2P NAT traversal
 			r.Post("/projects/{id}/signal", signalingHandler.SendSignal)
 			r.Get("/projects/{id}/signals", signalingHandler.GetSignals)
+			r.Get("/projects/{id}/ws", wsHub.HandleWebSocket)
 		})
 	})
 

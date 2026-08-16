@@ -3,7 +3,6 @@ package repository
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -54,12 +53,143 @@ func newPgStore(connString string) (*pgStore, error) {
 		pool.Close()
 		return nil, fmt.Errorf("ping: %w", err)
 	}
-	if _, err := pool.Exec(ctx, `CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, data JSONB NOT NULL)`); err != nil {
+	if _, err := pool.Exec(ctx, normalizedSchemaSQL); err != nil {
 		pool.Close()
-		return nil, fmt.Errorf("create kv table: %w", err)
+		return nil, fmt.Errorf("create postgres schema: %w", err)
 	}
-	return &pgStore{pool: pool}, nil
+	pg := &pgStore{pool: pool}
+	if err := pg.migrateLegacyKV(ctx); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("migrate legacy kv data: %w", err)
+	}
+	return pg, nil
 }
+
+const normalizedSchemaSQL = `
+CREATE TABLE IF NOT EXISTS kv (
+	key TEXT PRIMARY KEY,
+	data JSONB NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS secrets (
+	name TEXT PRIMARY KEY,
+	value TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS users (
+	id TEXT PRIMARY KEY,
+	display_name TEXT NOT NULL,
+	email TEXT NOT NULL,
+	plan_tier TEXT NOT NULL,
+	bio TEXT NOT NULL DEFAULT '',
+	status TEXT NOT NULL DEFAULT 'offline',
+	activity TEXT NOT NULL DEFAULT '',
+	avatar_url TEXT NOT NULL DEFAULT '',
+	public_key_fingerprint TEXT NOT NULL DEFAULT '',
+	machine_id TEXT NOT NULL DEFAULT '',
+	last_seen TIMESTAMPTZ,
+	created_at TIMESTAMPTZ NOT NULL,
+	updated_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS license_index (
+	license_key TEXT PRIMARY KEY,
+	user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_license_index_user_id ON license_index(user_id);
+
+CREATE TABLE IF NOT EXISTS friend_requests (
+	id TEXT PRIMARY KEY,
+	from_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	to_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	status TEXT NOT NULL,
+	created_at TIMESTAMPTZ NOT NULL,
+	UNIQUE(from_id, to_id)
+);
+CREATE INDEX IF NOT EXISTS idx_friend_requests_to_status ON friend_requests(to_id, status);
+
+CREATE TABLE IF NOT EXISTS friends (
+	user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	friend_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	PRIMARY KEY(user_id, friend_id)
+);
+
+CREATE TABLE IF NOT EXISTS projects (
+	id TEXT PRIMARY KEY,
+	name TEXT NOT NULL,
+	language TEXT NOT NULL,
+	domain TEXT NOT NULL,
+	owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	created_at TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_projects_owner_id ON projects(owner_id);
+
+CREATE TABLE IF NOT EXISTS project_members (
+	project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+	user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	role TEXT NOT NULL,
+	path TEXT NOT NULL DEFAULT '',
+	PRIMARY KEY(project_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_project_members_user_id ON project_members(user_id);
+
+CREATE TABLE IF NOT EXISTS tasks (
+	id TEXT PRIMARY KEY,
+	project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+	title TEXT NOT NULL,
+	assignee_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	creator_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	status TEXT NOT NULL,
+	created_at TIMESTAMPTZ NOT NULL,
+	completed_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_tasks_project_id ON tasks(project_id);
+
+CREATE TABLE IF NOT EXISTS deltas (
+	id TEXT PRIMARY KEY,
+	project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+	author_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	data TEXT NOT NULL,
+	created_at TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_deltas_project_created ON deltas(project_id, created_at);
+
+CREATE TABLE IF NOT EXISTS delta_acks (
+	delta_id TEXT NOT NULL REFERENCES deltas(id) ON DELETE CASCADE,
+	user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	PRIMARY KEY(delta_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS activity_logs (
+	id TEXT PRIMARY KEY,
+	user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+	action TEXT NOT NULL,
+	created_at TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_activity_user_created ON activity_logs(user_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_activity_project_created ON activity_logs(project_id, created_at);
+
+CREATE TABLE IF NOT EXISTS messages (
+	id TEXT PRIMARY KEY,
+	channel_id TEXT NOT NULL,
+	author_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	text TEXT NOT NULL,
+	created_at TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_messages_channel_created ON messages(channel_id, created_at);
+
+CREATE TABLE IF NOT EXISTS signals (
+	id TEXT PRIMARY KEY,
+	project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+	from_peer TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	to_peer TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	type TEXT NOT NULL,
+	payload TEXT NOT NULL,
+	created_at TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_signals_project_to_created ON signals(project_id, to_peer, created_at);
+`
 
 func (p *pgStore) close() {
 	p.pool.Close()
@@ -68,55 +198,13 @@ func (p *pgStore) close() {
 // load fills the (already initialized) store maps from the kv table. Keys that
 // have no row simply leave their map/slice as the zero value initialized by New.
 func (p *pgStore) load(s *store) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-
-	rows, err := p.pool.Query(ctx, `SELECT key, data FROM kv`)
-	if err != nil {
-		return fmt.Errorf("query kv: %w", err)
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var key string
-		var data []byte
-		if err := rows.Scan(&key, &data); err != nil {
-			return err
-		}
-		if err := unmarshalKey(key, data, s); err != nil {
-			return fmt.Errorf("kv key %q: %w", key, err)
-		}
-	}
-	return rows.Err()
+	return nil
 }
 
-// save upserts the whole store in a single transaction so a crash can never
-// leave the tables half-updated. All keys are written unconditionally, keeping
-// the semantics identical to the old "rewrite the whole JSON file" save.
+// save is intentionally a no-op in Postgres mode. Production persistence uses
+// table-backed repository methods, so a generic whole-store rewrite would
+// reintroduce the scaling problem this store replaces.
 func (p *pgStore) save(s *store) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-
-	tx, err := p.pool.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("begin: %w", err)
-	}
-	defer tx.Rollback(ctx)
-
-	for _, r := range kvRows(s) {
-		data, err := json.Marshal(r.val)
-		if err != nil {
-			return fmt.Errorf("marshal %s: %w", r.key, err)
-		}
-		if _, err := tx.Exec(ctx,
-			`INSERT INTO kv (key, data) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET data = EXCLUDED.data`,
-			r.key, string(data)); err != nil {
-			return fmt.Errorf("upsert %s: %w", r.key, err)
-		}
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit: %w", err)
-	}
 	return nil
 }
 
@@ -195,35 +283,35 @@ func unmarshalKey(key string, data []byte, s *store) error {
 
 // --- Persisted secrets (JWT / invite salt) ---
 
-const secretsKey = "secrets"
-
 func (p *pgStore) loadSecrets(ctx context.Context) (map[string]string, error) {
 	secrets := map[string]string{}
-	var data []byte
-	err := p.pool.QueryRow(ctx, `SELECT data FROM kv WHERE key = $1`, secretsKey).Scan(&data)
+	rows, err := p.pool.Query(ctx, `SELECT name, value FROM secrets`)
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return secrets, nil
-		}
 		return nil, err
 	}
-	if len(data) > 0 {
-		if jerr := json.Unmarshal(data, &secrets); jerr != nil {
-			return nil, jerr
+	defer rows.Close()
+	for rows.Next() {
+		var name, value string
+		if err := rows.Scan(&name, &value); err != nil {
+			return nil, err
 		}
+		secrets[name] = value
 	}
-	return secrets, nil
+	return secrets, rows.Err()
 }
 
 func (p *pgStore) storeSecrets(ctx context.Context, secrets map[string]string) error {
-	data, err := json.Marshal(secrets)
+	tx, err := p.pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
-	_, err = p.pool.Exec(ctx,
-		`INSERT INTO kv (key, data) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET data = EXCLUDED.data`,
-		secretsKey, string(data))
-	return err
+	defer tx.Rollback(ctx)
+	for name, value := range secrets {
+		if _, err := tx.Exec(ctx, `INSERT INTO secrets (name, value) VALUES ($1,$2) ON CONFLICT (name) DO UPDATE SET value = EXCLUDED.value`, name, value); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
 }
 
 // getOrCreateSecret returns the persisted secret for name, generating and
