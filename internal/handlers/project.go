@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -432,9 +431,9 @@ func (h *ProjectHandler) UpdateMemberPath(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"}); return
 	}
 
-	cleaned := filepath.Clean(req.Path)
-	if strings.Contains(cleaned, "..") || filepath.IsAbs(cleaned) {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "path must be relative and contain no '..' components"}); return
+	cleaned := req.Path
+	if strings.Contains(cleaned, "..") {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "path cannot contain '..' components"}); return
 	}
 
 	if err := h.db.UpdateMemberPath(projectID, userID, cleaned); err != nil {
