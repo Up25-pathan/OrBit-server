@@ -31,7 +31,7 @@ var allowedOrigins = map[string]bool{
 	"http://tauri.localhost":                 true,
 	"https://tauri.localhost":                true,
 	"asset://localhost":                      true,
-	"https://orbit-sync.onrender.com":        true,
+	"https://orbit-server-xbr5.onrender.com":        true,
 	"https://orbit-server-kae6.onrender.com": true,
 	"https://orbit.dev":                      true,
 }

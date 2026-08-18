@@ -62,6 +62,20 @@ func newPgStore(connString string) (*pgStore, error) {
 		pool.Close()
 		return nil, fmt.Errorf("migrate legacy kv data: %w", err)
 	}
+
+	// One-time migration: clear legacy machine_id values from old local storage scheme.
+	// We only run this if a migration marker has not been set in the KV store, so it only runs once in production history.
+	var hasReset bool
+	err = pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM kv WHERE key = 'migration_clear_legacy_machine_ids')`).Scan(&hasReset)
+	if err == nil && !hasReset {
+		if _, err := pool.Exec(ctx, `UPDATE users SET machine_id = ''`); err == nil {
+			_, _ = pool.Exec(ctx, `INSERT INTO kv (key, data) VALUES ('migration_clear_legacy_machine_ids', 'true'::jsonb)`)
+			log.Printf("[db] Successfully cleared legacy machine IDs on startup")
+		} else {
+			log.Printf("[db] WARNING: Failed to clear legacy machine IDs: %v", err)
+		}
+	}
+
 	return pg, nil
 }
 

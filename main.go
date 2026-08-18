@@ -155,7 +155,7 @@ func main() {
 			// In production, generate time-limited TURN credentials using a TURN secret
 			// For now, return static configuration - replace with actual TURN server
 			w.Header().Set("Content-Type", "application/json")
-			w.Write([]byte(`{"username":"orbit-user","credential":"turn-secret-change-in-production","urls":["turn:turn.orbit-sync.onrender.com:3478?transport=udp","turn:turn.orbit-sync.onrender.com:3478?transport=tcp"],"ttl":86400}`))
+			w.Write([]byte(`{"username":"orbit-user","credential":"turn-secret-change-in-production","urls":["turn:turn.orbit-server-xbr5.onrender.com:3478?transport=udp","turn:turn.orbit-server-xbr5.onrender.com:3478?transport=tcp"],"ttl":86400}`))
 		})
 
 		// License Key Authentication — single endpoint, no signup/signin
@@ -266,7 +266,7 @@ var allowedOrigins = map[string]bool{
 	"http://tauri.localhost":                 true,
 	"https://tauri.localhost":                true,
 	"asset://localhost":                      true,
-	"https://orbit-sync.onrender.com":        true,
+	"https://orbit-server-xbr5.onrender.com":        true,
 	"https://orbit-server-kae6.onrender.com": true,
 	"https://orbit.dev":                      true,
 }
