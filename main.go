@@ -110,8 +110,8 @@ func main() {
 	signalingHandler := handlers.NewSignalingHandler(db, wsHub)
 
 	r := chi.NewRouter()
-	r.Use(middleware.RateLimit)
 	r.Use(corsMiddleware)
+	r.Use(middleware.RateLimit)
 	r.Use(func(next http.Handler) http.Handler {
 		logger := chimw.Logger(next)
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
