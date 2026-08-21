@@ -719,11 +719,11 @@ func (p *pgStore) sweepExpiredDeltas(ttl time.Duration) int {
 	return int(ct.RowsAffected())
 }
 
-func (p *pgStore) createTask(projectID, title, assigneeID, creatorID string) (*models.Task, error) {
+func (p *pgStore) createTask(projectID, title, assigneeID, creatorID, priority, tag string) (*models.Task, error) {
 	ctx, cancel := pgCtx()
 	defer cancel()
-	t := &models.Task{ID: generateID("tsk"), ProjectID: projectID, Title: title, AssigneeID: assigneeID, CreatorID: creatorID, Status: "open", CreatedAt: time.Now().UTC()}
-	_, err := p.pool.Exec(ctx, `INSERT INTO tasks (id, project_id, title, assignee_id, creator_id, status, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7)`, t.ID, t.ProjectID, t.Title, t.AssigneeID, t.CreatorID, t.Status, t.CreatedAt)
+	t := &models.Task{ID: generateID("tsk"), ProjectID: projectID, Title: title, AssigneeID: assigneeID, CreatorID: creatorID, Status: "open", Stage: "backlog", Priority: priority, Tag: tag, CreatedAt: time.Now().UTC()}
+	_, err := p.pool.Exec(ctx, `INSERT INTO tasks (id, project_id, title, assignee_id, creator_id, status, stage, priority, tag, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, t.ID, t.ProjectID, t.Title, t.AssigneeID, t.CreatorID, t.Status, t.Stage, t.Priority, t.Tag, t.CreatedAt)
 	return t, err
 }
 
@@ -731,7 +731,7 @@ func (p *pgStore) getTasks(projectID string) ([]models.Task, error) {
 	ctx, cancel := pgCtx()
 	defer cancel()
 	rows, err := p.pool.Query(ctx, `
-		SELECT t.id, t.project_id, t.title, t.assignee_id, t.creator_id, t.status, t.created_at, t.completed_at,
+		SELECT t.id, t.project_id, t.title, t.assignee_id, t.creator_id, t.status, t.stage, t.priority, t.tag, t.created_at, t.completed_at,
 		       u.id, u.display_name, u.email, u.avatar_url
 		FROM tasks t
 		LEFT JOIN users u ON u.id = t.assignee_id
@@ -744,7 +744,7 @@ func (p *pgStore) getTasks(projectID string) ([]models.Task, error) {
 	var result []models.Task
 	for rows.Next() {
 		var t models.Task
-		if err := rows.Scan(&t.ID, &t.ProjectID, &t.Title, &t.AssigneeID, &t.CreatorID, &t.Status, &t.CreatedAt, &t.CompletedAt, &t.Assignee.ID, &t.Assignee.DisplayName, &t.Assignee.Email, &t.Assignee.AvatarURL); err != nil {
+		if err := rows.Scan(&t.ID, &t.ProjectID, &t.Title, &t.AssigneeID, &t.CreatorID, &t.Status, &t.Stage, &t.Priority, &t.Tag, &t.CreatedAt, &t.CompletedAt, &t.Assignee.ID, &t.Assignee.DisplayName, &t.Assignee.Email, &t.Assignee.AvatarURL); err != nil {
 			return nil, err
 		}
 		result = append(result, t)
@@ -758,10 +758,54 @@ func (p *pgStore) completeTask(projectID, taskID string) (*models.Task, error) {
 	now := time.Now().UTC()
 	var t models.Task
 	err := p.pool.QueryRow(ctx, `
-		UPDATE tasks SET status = 'completed', completed_at = $3
+		UPDATE tasks SET status = 'completed', stage = 'completed', completed_at = $3
 		WHERE project_id = $1 AND id = $2
-		RETURNING id, project_id, title, assignee_id, creator_id, status, created_at, completed_at`,
-		projectID, taskID, now).Scan(&t.ID, &t.ProjectID, &t.Title, &t.AssigneeID, &t.CreatorID, &t.Status, &t.CreatedAt, &t.CompletedAt)
+		RETURNING id, project_id, title, assignee_id, creator_id, status, stage, priority, tag, created_at, completed_at`,
+		projectID, taskID, now).Scan(&t.ID, &t.ProjectID, &t.Title, &t.AssigneeID, &t.CreatorID, &t.Status, &t.Stage, &t.Priority, &t.Tag, &t.CreatedAt, &t.CompletedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("task not found")
+	}
+	return &t, err
+}
+
+func (p *pgStore) updateTask(projectID, taskID string, req models.UpdateTaskRequest) (*models.Task, error) {
+	ctx, cancel := pgCtx()
+	defer cancel()
+	var sets []string
+	var args []interface{}
+	argIdx := 3
+	if req.Stage != "" {
+		sets = append(sets, fmt.Sprintf("stage = $%d", argIdx))
+		args = append(args, req.Stage)
+		argIdx++
+		if req.Stage == "completed" {
+			sets = append(sets, "status = 'completed'")
+			now := time.Now().UTC()
+			sets = append(sets, fmt.Sprintf("completed_at = $%d", argIdx))
+			args = append(args, now)
+			argIdx++
+		} else if req.Stage == "backlog" || req.Stage == "in_progress" || req.Stage == "review" {
+			sets = append(sets, "status = 'open'")
+			sets = append(sets, fmt.Sprintf("completed_at = NULL"))
+		}
+	}
+	if req.Priority != "" {
+		sets = append(sets, fmt.Sprintf("priority = $%d", argIdx))
+		args = append(args, req.Priority)
+		argIdx++
+	}
+	if req.Tag != "" {
+		sets = append(sets, fmt.Sprintf("tag = $%d", argIdx))
+		args = append(args, req.Tag)
+		argIdx++
+	}
+	if len(sets) == 0 {
+		return nil, fmt.Errorf("no fields to update")
+	}
+	query := fmt.Sprintf("UPDATE tasks SET %s WHERE project_id = $1 AND id = $2 RETURNING id, project_id, title, assignee_id, creator_id, status, stage, priority, tag, created_at, completed_at", strings.Join(sets, ", "))
+	args = append([]interface{}{projectID, taskID}, args...)
+	var t models.Task
+	err := p.pool.QueryRow(ctx, query, args...).Scan(&t.ID, &t.ProjectID, &t.Title, &t.AssigneeID, &t.CreatorID, &t.Status, &t.Stage, &t.Priority, &t.Tag, &t.CreatedAt, &t.CompletedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("task not found")
 	}

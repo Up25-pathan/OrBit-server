@@ -18,6 +18,9 @@ type Task struct {
 	AssigneeID  string    `json:"assigneeId"`
 	CreatorID   string    `json:"creatorId"`
 	Status      string    `json:"status"` // "open" | "completed"
+	Stage       string    `json:"stage"`  // "backlog" | "in_progress" | "review" | "completed"
+	Priority    string    `json:"priority"` // "high" | "medium" | "low"
+	Tag         string    `json:"tag"`    // "feature" | "bug" | "refactor" | "docs"
 	CreatedAt   time.Time `json:"createdAt"`
 	CompletedAt *time.Time `json:"completedAt,omitempty"`
 	Assignee    UserSearchResult `json:"assignee"`
@@ -65,6 +68,8 @@ type UpdateProjectRequest struct {
 type CreateTaskRequest struct {
 	Title      string `json:"title"`
 	AssigneeID string `json:"assigneeId"`
+	Priority   string `json:"priority"`
+	Tag        string `json:"tag"`
 }
 
 type ActivityLog struct {
@@ -99,4 +104,10 @@ type ChatMessage struct {
 
 type SendMessageRequest struct {
 	Text string `json:"text"`
+}
+
+type UpdateTaskRequest struct {
+	Stage    string `json:"stage,omitempty"`
+	Priority string `json:"priority,omitempty"`
+	Tag      string `json:"tag,omitempty"`
 }

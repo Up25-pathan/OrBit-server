@@ -76,6 +76,15 @@ func newPgStore(connString string) (*pgStore, error) {
 		}
 	}
 
+	// Migration: add stage/priority/tag columns to tasks table if missing.
+	for _, col := range []struct{ name, typedef string }{
+		{"stage", "TEXT NOT NULL DEFAULT 'backlog'"},
+		{"priority", "TEXT NOT NULL DEFAULT 'medium'"},
+		{"tag", "TEXT NOT NULL DEFAULT 'feature'"},
+	} {
+		_, _ = pool.Exec(ctx, fmt.Sprintf("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS %s %s", col.name, col.typedef))
+	}
+
 	return pg, nil
 }
 
@@ -154,6 +163,9 @@ CREATE TABLE IF NOT EXISTS tasks (
 	assignee_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
 	creator_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
 	status TEXT NOT NULL,
+	stage TEXT NOT NULL DEFAULT 'backlog',
+	priority TEXT NOT NULL DEFAULT 'medium',
+	tag TEXT NOT NULL DEFAULT 'feature',
 	created_at TIMESTAMPTZ NOT NULL,
 	completed_at TIMESTAMPTZ
 );

@@ -336,8 +336,10 @@ func (h *ProjectHandler) CreateTask(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Title == "" { writeJSON(w, http.StatusBadRequest, map[string]string{"error": "title is required"}); return }
 	if req.AssigneeID == "" { writeJSON(w, http.StatusBadRequest, map[string]string{"error": "assignee is required"}); return }
+	if req.Priority == "" { req.Priority = "medium" }
+	if req.Tag == "" { req.Tag = "feature" }
 
-	task, err := h.db.CreateTask(projectID, req.Title, req.AssigneeID, userID)
+	task, err := h.db.CreateTask(projectID, req.Title, req.AssigneeID, userID, req.Priority, req.Tag)
 	if err != nil { writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()}); return }
 
 	writeJSON(w, http.StatusCreated, task)
@@ -396,6 +398,29 @@ func (h *ProjectHandler) DeleteTask(w http.ResponseWriter, r *http.Request) {
 	h.db.LogActivity(userID, projectID, "task_deleted")
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+func (h *ProjectHandler) UpdateTask(w http.ResponseWriter, r *http.Request) {
+	userID := middleware.GetUserID(r)
+	if userID == "" { writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"}); return }
+
+	projectID := chi.URLParam(r, "id")
+	if !h.db.IsProjectMember(projectID, userID) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "not a member"}); return
+	}
+
+	taskID := chi.URLParam(r, "taskId")
+
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
+	var req models.UpdateTaskRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"}); return
+	}
+
+	task, err := h.db.UpdateTask(projectID, taskID, req)
+	if err != nil { writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()}); return }
+
+	writeJSON(w, http.StatusOK, task)
 }
 
 func (h *ProjectHandler) Leaderboard(w http.ResponseWriter, r *http.Request) {

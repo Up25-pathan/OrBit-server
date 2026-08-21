@@ -215,6 +215,7 @@ func main() {
 
 			r.Post("/projects/{id}/tasks", projectHandler.CreateTask)
 			r.Get("/projects/{id}/tasks", projectHandler.ListTasks)
+			r.Patch("/projects/{id}/tasks/{taskId}", projectHandler.UpdateTask)
 			r.Put("/projects/{id}/tasks/{taskId}/complete", projectHandler.CompleteTask)
 			r.Delete("/projects/{id}/tasks/{taskId}", projectHandler.DeleteTask)
 			r.Get("/projects/{id}/leaderboard", projectHandler.Leaderboard)

@@ -747,13 +747,15 @@ func (db *DB) StartDeltaSweeperWithCtx(ctx context.Context) {
 	}()
 }
 
-func (db *DB) CreateTask(projectID, title, assigneeID, creatorID string) (*models.Task, error) {
+func (db *DB) CreateTask(projectID, title, assigneeID, creatorID, priority, tag string) (*models.Task, error) {
 	if db.pg != nil {
-		return db.pg.createTask(projectID, title, assigneeID, creatorID)
+		return db.pg.createTask(projectID, title, assigneeID, creatorID, priority, tag)
 	}
+	if priority == "" { priority = "medium" }
+	if tag == "" { tag = "feature" }
 	db.mu.Lock()
 	task := &models.Task{
-		ID: generateID("tsk"), ProjectID: projectID, Title: title, AssigneeID: assigneeID, CreatorID: creatorID, Status: "open", CreatedAt: time.Now().UTC(),
+		ID: generateID("tsk"), ProjectID: projectID, Title: title, AssigneeID: assigneeID, CreatorID: creatorID, Status: "open", Stage: "backlog", Priority: priority, Tag: tag, CreatedAt: time.Now().UTC(),
 	}
 	db.data.Tasks[projectID] = append(db.data.Tasks[projectID], task)
 	ct := *task
@@ -793,6 +795,7 @@ func (db *DB) CompleteTask(projectID, taskID string) (*models.Task, error) {
 	for _, t := range tasks {
 		if t.ID == taskID {
 			t.Status = "completed"
+			t.Stage = "completed"
 			now := time.Now().UTC()
 			t.CompletedAt = &now
 			ct := *t
@@ -1052,6 +1055,37 @@ func (db *DB) DeleteTask(projectID, taskID string) error {
 	db.data.Tasks[projectID] = kept
 	db.mu.Unlock()
 	return db.save()
+}
+
+func (db *DB) UpdateTask(projectID, taskID string, req models.UpdateTaskRequest) (*models.Task, error) {
+	if db.pg != nil {
+		return db.pg.updateTask(projectID, taskID, req)
+	}
+	db.mu.Lock()
+	tasks := db.data.Tasks[projectID]
+	for _, t := range tasks {
+		if t.ID == taskID {
+			if req.Stage != "" {
+				t.Stage = req.Stage
+				if req.Stage == "completed" {
+					t.Status = "completed"
+					now := time.Now().UTC()
+					t.CompletedAt = &now
+				} else if req.Stage == "backlog" || req.Stage == "in_progress" || req.Stage == "review" {
+					t.Status = "open"
+					t.CompletedAt = nil
+				}
+			}
+			if req.Priority != "" { t.Priority = req.Priority }
+			if req.Tag != "" { t.Tag = req.Tag }
+			ct := *t
+			db.mu.Unlock()
+			if err := db.save(); err != nil { return nil, err }
+			return &ct, nil
+		}
+	}
+	db.mu.Unlock()
+	return nil, fmt.Errorf("task not found")
 }
 
 func (db *DB) DeleteProject(projectID string) error {
