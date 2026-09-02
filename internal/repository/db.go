@@ -747,6 +747,62 @@ func (db *DB) StartDeltaSweeperWithCtx(ctx context.Context) {
 	}()
 }
 
+// SweepOrphanedProjects removes projects that are older than maxAge and have 0 deltas.
+// This cleans up projects where the local daemon failed to initialize the workspace.
+func (db *DB) SweepOrphanedProjects(maxAge time.Duration) int {
+	db.mu.Lock()
+	now := time.Now()
+	var orphaned []string
+	
+	for id, p := range db.data.Projects {
+		if now.Sub(p.CreatedAt) > maxAge {
+			if len(db.data.Deltas[id]) == 0 {
+				orphaned = append(orphaned, id)
+			}
+		}
+	}
+	
+	for _, id := range orphaned {
+		delete(db.data.Projects, id)
+		delete(db.data.ProjectMembers, id)
+		delete(db.data.Tasks, id)
+		delete(db.data.Messages, id)
+		delete(db.data.Deltas, id)
+	}
+	db.mu.Unlock()
+
+	if len(orphaned) > 0 {
+		if err := db.save(); err != nil {
+			log.Printf("[orphan-gc] save failed: %v", err)
+		}
+	}
+	return len(orphaned)
+}
+
+func (db *DB) StartOrphanSweeperWithCtx(ctx context.Context) {
+	const orphanAge = 24 * time.Hour
+	const sweepInterval = 1 * time.Hour
+
+	go func() {
+		if n := db.SweepOrphanedProjects(orphanAge); n > 0 {
+			log.Printf("[orphan-gc] Startup sweep: purged %d orphaned project(s)\n", n)
+		}
+
+		ticker := time.NewTicker(sweepInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				if n := db.SweepOrphanedProjects(orphanAge); n > 0 {
+					log.Printf("[orphan-gc] Periodic sweep: purged %d orphaned project(s)\n", n)
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+}
+
 func (db *DB) CreateTask(projectID, title, assigneeID, creatorID, priority, tag string) (*models.Task, error) {
 	if db.pg != nil {
 		return db.pg.createTask(projectID, title, assigneeID, creatorID, priority, tag)

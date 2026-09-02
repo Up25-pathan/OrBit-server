@@ -46,6 +46,9 @@ func main() {
 	// Encrypted Cloud Relay: Start background sweeper to purge expired delta blobs (7-day TTL)
 	db.StartDeltaSweeperWithCtx(ctx)
 
+	// Orphaned Projects: Start background sweeper to purge empty/failed project creations
+	db.StartOrphanSweeperWithCtx(ctx)
+
 	// Presence Heartbeat: Mark users offline after inactivity
 	wg.Add(1)
 	go func() {
@@ -108,6 +111,7 @@ func main() {
 	projectHandler := handlers.NewProjectHandler(db, inviteSalt)
 	wsHub := websocket.NewHub(db)
 	signalingHandler := handlers.NewSignalingHandler(db, wsHub)
+	telemetryHandler := handlers.NewTelemetryHandler(db)
 
 	r := chi.NewRouter()
 	r.Use(corsMiddleware)
@@ -140,6 +144,8 @@ func main() {
 		r.Get("/health", healthHandler)
 		r.Head("/health", healthHandler)
 		// Audit Fix #42: Add updater endpoint handler returning current version info
+		r.Get("/system/status", telemetryHandler.GetStatus)
+		r.Post("/system/sweep", telemetryHandler.TriggerSweep)
 		r.Get("/updater/latest.json", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			w.Write([]byte(`{"version":"0.1.0","notes":"No updates available currently.","pub_date":"2026-07-27T00:00:00Z","platforms":{"windows-x86_64":{"signature":"","url":""},"darwin-x86_64":{"signature":"","url":""},"darwin-aarch64":{"signature":"","url":""},"linux-x86_64":{"signature":"","url":""}}}`))

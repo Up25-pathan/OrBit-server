@@ -12,9 +12,14 @@ import (
 	"github.com/orbit/control-server/internal/repository"
 )
 
+type PeerConnection struct {
+	mu   sync.Mutex
+	conn *websocket.Conn
+}
+
 type Hub struct {
 	mu           sync.RWMutex
-	connections  map[string]map[string]*websocket.Conn // projectID -> peerID -> connection
+	connections  map[string]map[string]*PeerConnection // projectID -> peerID -> connection
 	upgrader     websocket.Upgrader
 	db           *repository.DB
 }
@@ -123,9 +128,9 @@ func (h *Hub) addConnection(projectID, peerID string, conn *websocket.Conn) {
 	defer h.mu.Unlock()
 
 	if h.connections[projectID] == nil {
-		h.connections[projectID] = make(map[string]*websocket.Conn)
+		h.connections[projectID] = make(map[string]*PeerConnection)
 	}
-	h.connections[projectID][peerID] = conn
+	h.connections[projectID][peerID] = &PeerConnection{conn: conn}
 }
 
 func (h *Hub) removeConnection(projectID, peerID string) {
@@ -141,17 +146,20 @@ func (h *Hub) removeConnection(projectID, peerID string) {
 }
 
 func (h *Hub) DeliverSignal(projectID, toPeer string, msg SignalMessage) {
-	// Hold lock during entire operation to prevent race where connection
-	// is removed between RUnlock and WriteJSON
 	h.mu.RLock()
-	conn, ok := h.connections[projectID][toPeer]
+	peerConn, ok := h.connections[projectID][toPeer]
+	h.mu.RUnlock()
+
 	if ok {
-		if err := conn.WriteJSON(msg); err != nil {
+		peerConn.mu.Lock()
+		err := peerConn.conn.WriteJSON(msg)
+		peerConn.mu.Unlock()
+
+		if err != nil {
 			log.Printf("[ws] write error to %s: %v", toPeer, err)
 			h.removeConnection(projectID, toPeer)
 		}
 	}
-	h.mu.RUnlock()
 }
 
 func (h *Hub) deliverSignal(projectID, toPeer string, msg SignalMessage) {
@@ -163,11 +171,16 @@ func (h *Hub) BroadcastToProject(projectID string, msg SignalMessage) {
 	conns := h.connections[projectID]
 	h.mu.RUnlock()
 
-	for peerID, conn := range conns {
+	for peerID, peerConn := range conns {
 		if peerID == msg.FromPeer {
 			continue
 		}
-		if err := conn.WriteJSON(msg); err != nil {
+		
+		peerConn.mu.Lock()
+		err := peerConn.conn.WriteJSON(msg)
+		peerConn.mu.Unlock()
+
+		if err != nil {
 			log.Printf("[ws] broadcast error to %s: %v", peerID, err)
 			h.removeConnection(projectID, peerID)
 		}

@@ -136,8 +136,10 @@ func (h *SignalingHandler) GetSignals(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Signals are cleaned up by the TTL sweeper, not on read.
-	// This prevents signal loss if the client fails to process them.
+	// Audit Fix: Clear signals immediately after fetching to prevent WebRTC glare loops.
+	if len(signals) > 0 {
+		_ = h.db.ClearSignalsForPeer(projectID, toPeer)
+	}
 
 	writeJSON(w, http.StatusOK, resp)
 }
