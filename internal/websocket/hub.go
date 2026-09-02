@@ -56,7 +56,7 @@ func isAllowedOrigin(origin string) bool {
 
 func NewHub(db *repository.DB) *Hub {
 	return &Hub{
-		connections: make(map[string]map[string]*websocket.Conn),
+		connections: make(map[string]map[string]*PeerConnection),
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool {
 				origin := r.Header.Get("Origin")
