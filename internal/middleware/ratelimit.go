@@ -2,7 +2,7 @@ package middleware
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
@@ -36,7 +36,7 @@ func StartRateLimiterCleanup(ctx context.Context) {
 			case <-ticker.C:
 				count := limiter.purgeStale()
 				if count > 0 {
-					log.Printf("[ratelimit] Purged %d stale bucket(s)", count)
+					slog.Debug("[ratelimit] Purged stale bucket(s)", "count", count)
 				}
 			case <-ctx.Done():
 				return
@@ -112,6 +112,7 @@ func RateLimit(next http.Handler) http.Handler {
 		// Authenticated requests (active app user with JWT token): apply high-capacity limit rather than complete bypass
 		if r.Header.Get("Authorization") != "" {
 			if !limiter.allow("auth_user:"+ip, 100000, 100*time.Millisecond) {
+				slog.Warn("Rate limit exceeded", "category", "auth_user", "ip", ip, "path", path, "method", r.Method)
 				http.Error(w, `{"error":"rate limit exceeded"}`, http.StatusTooManyRequests)
 				return
 			}
@@ -127,6 +128,7 @@ func RateLimit(next http.Handler) http.Handler {
 
 		if strings.HasSuffix(path, "/auth/license") {
 			if !limiter.allow("auth:"+ip, 5000, 100*time.Millisecond) {
+				slog.Warn("Rate limit exceeded", "category", "auth", "ip", ip, "path", path, "method", r.Method)
 				http.Error(w, `{"error":"rate limit exceeded"}`, http.StatusTooManyRequests)
 				return
 			}
@@ -138,6 +140,7 @@ func RateLimit(next http.Handler) http.Handler {
 		method := r.Method
 		if method == "POST" || method == "PUT" || method == "DELETE" {
 			if !limiter.allow("write:"+ip, 10000, 100*time.Millisecond) {
+				slog.Warn("Rate limit exceeded", "category", "write", "ip", ip, "path", path, "method", r.Method)
 				http.Error(w, `{"error":"rate limit exceeded"}`, http.StatusTooManyRequests)
 				return
 			}
@@ -147,6 +150,7 @@ func RateLimit(next http.Handler) http.Handler {
 
 		// Read endpoints: high capacity for live polling and search
 		if !limiter.allow("read:"+ip, 50000, 100*time.Millisecond) {
+			slog.Warn("Rate limit exceeded", "category", "read", "ip", ip, "path", path, "method", r.Method)
 			http.Error(w, `{"error":"rate limit exceeded"}`, http.StatusTooManyRequests)
 			return
 		}

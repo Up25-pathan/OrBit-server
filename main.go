@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -14,10 +15,10 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	chimw "github.com/go-chi/chi/v5/middleware"
 	"github.com/orbit/control-server/internal/config"
 	"github.com/orbit/control-server/internal/handlers"
 	"github.com/orbit/control-server/internal/license"
+	"github.com/orbit/control-server/internal/logger"
 	"github.com/orbit/control-server/internal/middleware"
 	"github.com/orbit/control-server/internal/repository"
 	"github.com/orbit/control-server/internal/websocket"
@@ -25,6 +26,7 @@ import (
 
 func main() {
 	cfg := config.Load()
+	logger.Init(cfg.WebsiteURL, cfg.ServerSecret)
 
 	// DB loads from Postgres when DATABASE_URL is set (durable across Render
 	// restarts/redeploys), otherwise from the local JSON file.
@@ -116,18 +118,8 @@ func main() {
 	r := chi.NewRouter()
 	r.Use(corsMiddleware)
 	r.Use(middleware.RateLimit)
-	r.Use(func(next http.Handler) http.Handler {
-		logger := chimw.Logger(next)
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Skip logging for health check endpoints so keep-alive pings produce 0 log noise in server.log
-			if r.URL.Path == "/health" || r.URL.Path == "/api/v1/health" {
-				next.ServeHTTP(w, r)
-				return
-			}
-			logger.ServeHTTP(w, r)
-		})
-	})
-	r.Use(chimw.Recoverer)
+	r.Use(logger.HTTPLogger)
+	r.Use(logger.Recoverer)
 
 	// Ultra-lightweight health endpoints for keep-alive pings (UptimeRobot / Cron)
 	healthHandler := func(w http.ResponseWriter, r *http.Request) {
@@ -244,28 +236,29 @@ func main() {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		sig := <-sigCh
-		log.Printf("[server] Received signal %v — shutting down...", sig)
+		slog.Info("[server] Received signal — shutting down...", "signal", sig.String())
 		cancel()
 		// Stop accepting new requests
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer shutdownCancel()
 		if err := srv.Shutdown(shutdownCtx); err != nil {
-			log.Printf("[server] Shutdown error: %v", err)
+			slog.Error("[server] Shutdown error", "err", err.Error())
 		}
 	}()
 
-	log.Printf("OrBit control server listening on %s", addr)
+	slog.Info("OrBit control server listening", "addr", addr)
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Fatalf("server: %v", err)
+		slog.Error("Server fatal error", "err", err.Error())
+		os.Exit(1)
 	}
 
 	// Wait for background goroutines to finish
 	wg.Wait()
 	// Final persist under write lock
 	if err := db.Shutdown(); err != nil {
-		log.Printf("[server] Final save error: %v", err)
+		slog.Error("[server] Final save error", "err", err.Error())
 	}
-	log.Printf("[server] Shutdown complete")
+	slog.Info("[server] Shutdown complete")
 }
 
 var allowedOrigins = map[string]bool{
