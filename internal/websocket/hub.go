@@ -13,13 +13,14 @@ import (
 )
 
 type PeerConnection struct {
-	mu   sync.Mutex
-	conn *websocket.Conn
+	mu     sync.Mutex
+	conn   *websocket.Conn
+	userID string
 }
 
 type Hub struct {
 	mu           sync.RWMutex
-	connections  map[string]map[string]*PeerConnection // projectID -> peerID -> connection
+	connections  map[string]map[string]*PeerConnection // projectID -> connID -> connection
 	upgrader     websocket.Upgrader
 	db           *repository.DB
 }
@@ -95,10 +96,16 @@ func (h *Hub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 
-	h.addConnection(projectID, userID, conn)
+	// Unique connection ID per device instance
+	connID := strings.Join([]string{userID, r.RemoteAddr}, "@")
+	if connID == "" {
+		connID = userID
+	}
+
+	h.addConnection(projectID, connID, userID, conn)
 	defer func() {
-		h.removeConnection(projectID, userID)
-		h.BroadcastToProject(projectID, SignalMessage{
+		h.removeConnection(projectID, connID)
+		h.BroadcastToProject(projectID, connID, SignalMessage{
 			FromPeer:    userID,
 			FromPeerAlt: userID,
 			Type:        "peer_disconnected",
@@ -107,10 +114,10 @@ func (h *Hub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 		})
 	}()
 
-	log.Printf("[ws] peer %s connected to project %s", userID, projectID)
+	log.Printf("[ws] peer %s (conn %s) connected to project %s", userID, connID, projectID)
 
-	// Notify other peers in this project room that a peer joined
-	h.BroadcastToProject(projectID, SignalMessage{
+	// Notify other peer devices in this project room that a peer joined
+	h.BroadcastToProject(projectID, connID, SignalMessage{
 		FromPeer:    userID,
 		FromPeerAlt: userID,
 		Type:        "peer_connected",
@@ -162,7 +169,7 @@ func (h *Hub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if toPeer == "" || toPeer == "*" || toPeer == "all" {
-			h.BroadcastToProject(projectID, outMsg)
+			h.BroadcastToProject(projectID, connID, outMsg)
 		} else {
 			if err := h.db.SaveSignal(projectID, userID, toPeer, sigType, payload); err != nil {
 				log.Printf("[ws] save signal failed: %v", err)
@@ -172,22 +179,22 @@ func (h *Hub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (h *Hub) addConnection(projectID, peerID string, conn *websocket.Conn) {
+func (h *Hub) addConnection(projectID, connID, userID string, conn *websocket.Conn) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
 	if h.connections[projectID] == nil {
 		h.connections[projectID] = make(map[string]*PeerConnection)
 	}
-	h.connections[projectID][peerID] = &PeerConnection{conn: conn}
+	h.connections[projectID][connID] = &PeerConnection{conn: conn, userID: userID}
 }
 
-func (h *Hub) removeConnection(projectID, peerID string) {
+func (h *Hub) removeConnection(projectID, connID string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
 	if projectConns, ok := h.connections[projectID]; ok {
-		delete(projectConns, peerID)
+		delete(projectConns, connID)
 		if len(projectConns) == 0 {
 			delete(h.connections, projectID)
 		}
@@ -196,18 +203,29 @@ func (h *Hub) removeConnection(projectID, peerID string) {
 
 func (h *Hub) DeliverSignal(projectID, toPeer string, msg SignalMessage) {
 	h.mu.RLock()
-	peerConn, ok := h.connections[projectID][toPeer]
+	conns := h.connections[projectID]
 	h.mu.RUnlock()
 
-	if ok {
-		peerConn.mu.Lock()
-		err := peerConn.conn.WriteJSON(msg)
-		peerConn.mu.Unlock()
+	if conns == nil {
+		return
+	}
 
-		if err != nil {
-			log.Printf("[ws] write error to %s: %v", toPeer, err)
-			h.removeConnection(projectID, toPeer)
+	var deadConns []string
+	for cID, peerConn := range conns {
+		if cID == toPeer || peerConn.userID == toPeer {
+			peerConn.mu.Lock()
+			err := peerConn.conn.WriteJSON(msg)
+			peerConn.mu.Unlock()
+
+			if err != nil {
+				log.Printf("[ws] write error to %s: %v", toPeer, err)
+				deadConns = append(deadConns, cID)
+			}
 		}
+	}
+
+	for _, deadID := range deadConns {
+		h.removeConnection(projectID, deadID)
 	}
 }
 
@@ -215,24 +233,35 @@ func (h *Hub) deliverSignal(projectID, toPeer string, msg SignalMessage) {
 	h.DeliverSignal(projectID, toPeer, msg)
 }
 
-func (h *Hub) BroadcastToProject(projectID string, msg SignalMessage) {
+func (h *Hub) BroadcastToProject(projectID, senderConnID string, msg SignalMessage) {
 	h.mu.RLock()
 	conns := h.connections[projectID]
 	h.mu.RUnlock()
 
-	for peerID, peerConn := range conns {
-		if peerID == msg.FromPeer {
+	if conns == nil {
+		return
+	}
+
+	var deadConns []string
+	for cID, peerConn := range conns {
+		// Only skip the exact socket connection that sent this message.
+		// Other devices logged into the same user account WILL receive the signal.
+		if cID == senderConnID {
 			continue
 		}
-		
+
 		peerConn.mu.Lock()
 		err := peerConn.conn.WriteJSON(msg)
 		peerConn.mu.Unlock()
 
 		if err != nil {
-			log.Printf("[ws] broadcast error to %s: %v", peerID, err)
-			h.removeConnection(projectID, peerID)
+			log.Printf("[ws] broadcast error to %s: %v", cID, err)
+			deadConns = append(deadConns, cID)
 		}
+	}
+
+	for _, deadID := range deadConns {
+		h.removeConnection(projectID, deadID)
 	}
 }
 
