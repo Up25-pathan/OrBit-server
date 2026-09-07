@@ -191,14 +191,5 @@ func (h *Hub) isProjectMember(projectID, userID string) (bool, error) {
 	if h.db == nil {
 		return false, nil
 	}
-	members, err := h.db.GetProjectMembers(projectID)
-	if err != nil {
-		return false, err
-	}
-	for _, m := range members {
-		if m.UserID == userID {
-			return true, nil
-		}
-	}
-	return false, nil
+	return h.db.IsProjectMember(projectID, userID), nil
 }

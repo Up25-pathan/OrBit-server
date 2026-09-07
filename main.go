@@ -200,6 +200,7 @@ func main() {
 			r.Post("/projects/{id}/invite", projectHandler.Invite)
 			r.Get("/projects/{id}/token", projectHandler.GenerateToken)
 			r.Post("/projects/join", projectHandler.JoinByToken)
+			r.Post("/projects/{id}/join", projectHandler.JoinProject)
 			r.Put("/projects/{id}/path", projectHandler.UpdateMemberPath)
 			r.Post("/projects/{id}/messages", projectHandler.SendMessage)
 			r.Get("/projects/{id}/messages", projectHandler.ListMessages)

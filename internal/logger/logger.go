@@ -1,10 +1,12 @@
 package logger
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"runtime/debug"
@@ -136,6 +138,21 @@ func (w *responseWriterInterceptor) Write(b []byte) (int, error) {
 	n, err := w.ResponseWriter.Write(b)
 	w.bytes += n
 	return n, err
+}
+
+// Hijack implements http.Hijacker so WebSocket upgrader can hijack the TCP connection
+func (w *responseWriterInterceptor) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if hj, ok := w.ResponseWriter.(http.Hijacker); ok {
+		return hj.Hijack()
+	}
+	return nil, nil, fmt.Errorf("underlying ResponseWriter does not implement http.Hijacker")
+}
+
+// Flush implements http.Flusher so streaming responses can be flushed
+func (w *responseWriterInterceptor) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
 }
 
 // HTTPLogger provides structured HTTP access logging and automatic 5xx error alerting

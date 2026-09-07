@@ -182,6 +182,49 @@ func (h *ProjectHandler) JoinByToken(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "joined", "projectId": projectID})
 }
 
+// JoinProject allows an authenticated user to join a project directly via project ID
+func (h *ProjectHandler) JoinProject(w http.ResponseWriter, r *http.Request) {
+	userID := middleware.GetUserID(r)
+	if userID == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+
+	projectID := chi.URLParam(r, "id")
+	if projectID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "project ID required"})
+		return
+	}
+
+	project, err := h.db.GetProject(projectID)
+	if err != nil || project == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "project not found"})
+		return
+	}
+
+	// If already a member, return OK
+	if h.db.IsProjectMember(projectID, userID) {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "already_member", "projectId": projectID})
+		return
+	}
+
+	owner, _ := h.db.GetUserByID(project.OwnerID)
+	if owner != nil && owner.PlanTier == "free" {
+		members, _ := h.db.GetProjectMembers(projectID)
+		if len(members) >= 3 {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "The project owner is on the Free tier, which is limited to 2 peers per project (3 members total)."})
+			return
+		}
+	}
+
+	if err := h.db.InviteMember(projectID, userID); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "joined", "projectId": projectID})
+}
+
 func (h *ProjectHandler) PushDelta(w http.ResponseWriter, r *http.Request) {
 	userID := middleware.GetUserID(r)
 	if userID == "" { writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"}); return }
