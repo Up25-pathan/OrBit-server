@@ -54,7 +54,7 @@ func (h *ProjectHandler) Create(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	project, err := h.db.CreateProject(req.Name, req.Language, req.Domain, userID)
+	project, err := h.db.CreateProject(req.Name, req.Language, req.Domain, userID, req.ProjectToken)
 	if err != nil { writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()}); return }
 
 	writeJSON(w, http.StatusCreated, project)
@@ -274,11 +274,39 @@ func (h *ProjectHandler) Update(w http.ResponseWriter, r *http.Request) {
 	if project == nil { writeJSON(w, http.StatusNotFound, map[string]string{"error": "project not found"}); return }
 
 	project.Name = req.Name
+	if req.ProjectToken != "" {
+		project.ProjectToken = req.ProjectToken
+	}
 	if err := h.db.UpdateProject(project); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()}); return
 	}
 
 	writeJSON(w, http.StatusOK, project)
+}
+
+func (h *ProjectHandler) UpdateToken(w http.ResponseWriter, r *http.Request) {
+	userID := middleware.GetUserID(r)
+	if userID == "" { writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"}); return }
+
+	projectID := chi.URLParam(r, "id")
+	if !h.db.IsProjectOwner(projectID, userID) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "owner only"}); return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
+	var req models.UpdateTokenRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"}); return
+	}
+	if req.ProjectToken == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "projectToken is required"}); return
+	}
+
+	if err := h.db.UpdateProjectToken(projectID, req.ProjectToken); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()}); return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "token_updated"})
 }
 
 func (h *ProjectHandler) DeleteProject(w http.ResponseWriter, r *http.Request) {

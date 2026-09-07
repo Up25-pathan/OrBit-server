@@ -482,13 +482,19 @@ func (db *DB) GetFriends(userID string) ([]models.Friend, error) {
 	return friends, nil
 }
 
-func (db *DB) CreateProject(name, language, domain, ownerID string) (*models.Project, error) {
+func (db *DB) CreateProject(name, language, domain, ownerID, projectToken string) (*models.Project, error) {
+	if projectToken == "" {
+		tokenBytes := make([]byte, 32)
+		if _, err := rand.Read(tokenBytes); err == nil {
+			projectToken = fmt.Sprintf("orbit-sec-%x", tokenBytes)
+		}
+	}
 	if db.pg != nil {
-		return db.pg.createProject(name, language, domain, ownerID)
+		return db.pg.createProject(name, language, domain, ownerID, projectToken)
 	}
 	db.mu.Lock()
 	p := &models.Project{
-		ID: generateID("prj"), Name: name, Language: language, Domain: domain, OwnerID: ownerID, CreatedAt: time.Now().UTC(),
+		ID: generateID("prj"), Name: name, Language: language, Domain: domain, OwnerID: ownerID, CreatedAt: time.Now().UTC(), ProjectToken: projectToken,
 	}
 	db.data.Projects[p.ID] = p
 	db.data.ProjectMembers[p.ID] = []models.ProjectMember{
@@ -496,6 +502,23 @@ func (db *DB) CreateProject(name, language, domain, ownerID string) (*models.Pro
 	}
 	db.mu.Unlock()
 	return p, db.save()
+}
+
+func (db *DB) UpdateProjectToken(projectID, token string) error {
+	if token == "" {
+		return fmt.Errorf("token cannot be empty")
+	}
+	if db.pg != nil {
+		return db.pg.updateProjectToken(projectID, token)
+	}
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	p := db.data.Projects[projectID]
+	if p == nil {
+		return fmt.Errorf("project not found")
+	}
+	p.ProjectToken = token
+	return db.save()
 }
 
 func (db *DB) GetProject(id string) (*models.Project, error) {
@@ -581,6 +604,9 @@ func (db *DB) UpdateProject(p *models.Project) error {
 	existing := db.data.Projects[p.ID]
 	if existing == nil { db.mu.Unlock(); return fmt.Errorf("project not found") }
 	existing.Name = p.Name
+	if p.ProjectToken != "" {
+		existing.ProjectToken = p.ProjectToken
+	}
 	db.mu.Unlock()
 	return db.save()
 }

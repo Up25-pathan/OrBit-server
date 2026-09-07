@@ -199,6 +199,7 @@ func main() {
 			r.Delete("/projects/{id}", projectHandler.DeleteProject)
 			r.Post("/projects/{id}/invite", projectHandler.Invite)
 			r.Get("/projects/{id}/token", projectHandler.GenerateToken)
+			r.Put("/projects/{id}/token", projectHandler.UpdateToken)
 			r.Post("/projects/join", projectHandler.JoinByToken)
 			r.Post("/projects/{id}/join", projectHandler.JoinProject)
 			r.Put("/projects/{id}/path", projectHandler.UpdateMemberPath)

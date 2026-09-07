@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/orbit/control-server/internal/models"
 )
 
@@ -494,7 +495,7 @@ func (p *pgStore) getFriends(userID string) ([]models.Friend, error) {
 	return result, rows.Err()
 }
 
-func (p *pgStore) createProject(name, language, domain, ownerID string) (*models.Project, error) {
+func (p *pgStore) createProject(name, language, domain, ownerID, projectToken string) (*models.Project, error) {
 	ctx, cancel := pgCtx()
 	defer cancel()
 	tx, err := p.pool.Begin(ctx)
@@ -503,8 +504,8 @@ func (p *pgStore) createProject(name, language, domain, ownerID string) (*models
 	}
 	defer tx.Rollback(ctx)
 
-	prj := &models.Project{ID: generateID("prj"), Name: name, Language: language, Domain: domain, OwnerID: ownerID, CreatedAt: time.Now().UTC()}
-	if _, err := tx.Exec(ctx, `INSERT INTO projects (id, name, language, domain, owner_id, created_at) VALUES ($1,$2,$3,$4,$5,$6)`, prj.ID, prj.Name, prj.Language, prj.Domain, prj.OwnerID, prj.CreatedAt); err != nil {
+	prj := &models.Project{ID: generateID("prj"), Name: name, Language: language, Domain: domain, OwnerID: ownerID, CreatedAt: time.Now().UTC(), ProjectToken: projectToken}
+	if _, err := tx.Exec(ctx, `INSERT INTO projects (id, name, language, domain, owner_id, created_at, project_token) VALUES ($1,$2,$3,$4,$5,$6,$7)`, prj.ID, prj.Name, prj.Language, prj.Domain, prj.OwnerID, prj.CreatedAt, prj.ProjectToken); err != nil {
 		return nil, err
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO project_members (project_id, user_id, role, path) VALUES ($1,$2,'owner','')`, prj.ID, ownerID); err != nil {
@@ -520,7 +521,7 @@ func (p *pgStore) getProject(id string) (*models.Project, error) {
 	ctx, cancel := pgCtx()
 	defer cancel()
 	var prj models.Project
-	err := p.pool.QueryRow(ctx, `SELECT id, name, language, domain, owner_id, created_at FROM projects WHERE id = $1`, id).Scan(&prj.ID, &prj.Name, &prj.Language, &prj.Domain, &prj.OwnerID, &prj.CreatedAt)
+	err := p.pool.QueryRow(ctx, `SELECT id, name, language, domain, owner_id, created_at, COALESCE(project_token, '') FROM projects WHERE id = $1`, id).Scan(&prj.ID, &prj.Name, &prj.Language, &prj.Domain, &prj.OwnerID, &prj.CreatedAt, &prj.ProjectToken)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -534,7 +535,7 @@ func (p *pgStore) listProjectsForUser(userID string) ([]models.Project, error) {
 	ctx, cancel := pgCtx()
 	defer cancel()
 	rows, err := p.pool.Query(ctx, `
-		SELECT p.id, p.name, p.language, p.domain, p.owner_id, p.created_at
+		SELECT p.id, p.name, p.language, p.domain, p.owner_id, p.created_at, COALESCE(p.project_token, '')
 		FROM projects p
 		JOIN project_members pm ON pm.project_id = p.id
 		WHERE pm.user_id = $1
@@ -546,7 +547,7 @@ func (p *pgStore) listProjectsForUser(userID string) ([]models.Project, error) {
 	var result []models.Project
 	for rows.Next() {
 		var prj models.Project
-		if err := rows.Scan(&prj.ID, &prj.Name, &prj.Language, &prj.Domain, &prj.OwnerID, &prj.CreatedAt); err != nil {
+		if err := rows.Scan(&prj.ID, &prj.Name, &prj.Language, &prj.Domain, &prj.OwnerID, &prj.CreatedAt, &prj.ProjectToken); err != nil {
 			return nil, err
 		}
 		result = append(result, prj)
@@ -625,7 +626,26 @@ func (p *pgStore) getProjectMembers(projectID string) ([]models.ProjectMember, e
 func (p *pgStore) updateProject(prj *models.Project) error {
 	ctx, cancel := pgCtx()
 	defer cancel()
-	ct, err := p.pool.Exec(ctx, `UPDATE projects SET name = $2 WHERE id = $1`, prj.ID, prj.Name)
+	var ct pgconn.CommandTag
+	var err error
+	if prj.ProjectToken != "" {
+		ct, err = p.pool.Exec(ctx, `UPDATE projects SET name = $2, project_token = $3 WHERE id = $1`, prj.ID, prj.Name, prj.ProjectToken)
+	} else {
+		ct, err = p.pool.Exec(ctx, `UPDATE projects SET name = $2 WHERE id = $1`, prj.ID, prj.Name)
+	}
+	if err != nil {
+		return err
+	}
+	if ct.RowsAffected() == 0 {
+		return fmt.Errorf("project not found")
+	}
+	return nil
+}
+
+func (p *pgStore) updateProjectToken(projectID, token string) error {
+	ctx, cancel := pgCtx()
+	defer cancel()
+	ct, err := p.pool.Exec(ctx, `UPDATE projects SET project_token = $2 WHERE id = $1`, projectID, token)
 	if err != nil {
 		return err
 	}

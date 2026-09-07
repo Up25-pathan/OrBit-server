@@ -3,12 +3,13 @@ package models
 import "time"
 
 type Project struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	Language  string    `json:"language"`
-	Domain    string    `json:"domain"`
-	OwnerID   string    `json:"ownerId"`
-	CreatedAt time.Time `json:"createdAt"`
+	ID           string    `json:"id"`
+	Name         string    `json:"name"`
+	Language     string    `json:"language"`
+	Domain       string    `json:"domain"`
+	OwnerID      string    `json:"ownerId"`
+	CreatedAt    time.Time `json:"createdAt"`
+	ProjectToken string    `json:"projectToken,omitempty"`
 }
 
 type Task struct {
@@ -48,9 +49,10 @@ type ProjectDelta struct {
 }
 
 type CreateProjectRequest struct {
-	Name     string `json:"name"`
-	Language string `json:"language"`
-	Domain   string `json:"domain"`
+	Name         string `json:"name"`
+	Language     string `json:"language"`
+	Domain       string `json:"domain"`
+	ProjectToken string `json:"projectToken,omitempty"`
 }
 
 type InviteMemberRequest struct {
@@ -62,7 +64,12 @@ type PushDeltaRequest struct {
 }
 
 type UpdateProjectRequest struct {
-	Name string `json:"name"`
+	Name         string `json:"name"`
+	ProjectToken string `json:"projectToken,omitempty"`
+}
+
+type UpdateTokenRequest struct {
+	ProjectToken string `json:"projectToken"`
 }
 
 type CreateTaskRequest struct {

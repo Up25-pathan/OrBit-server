@@ -143,9 +143,11 @@ CREATE TABLE IF NOT EXISTS projects (
 	language TEXT NOT NULL,
 	domain TEXT NOT NULL,
 	owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-	created_at TIMESTAMPTZ NOT NULL
+	created_at TIMESTAMPTZ NOT NULL,
+	project_token TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_projects_owner_id ON projects(owner_id);
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS project_token TEXT NOT NULL DEFAULT '';
 
 CREATE TABLE IF NOT EXISTS project_members (
 	project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
