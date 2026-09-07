@@ -25,10 +25,13 @@ type Hub struct {
 }
 
 type SignalMessage struct {
-	ToPeer   string `json:"toPeer"`
-	FromPeer string `json:"fromPeer"`
-	Type     string `json:"type"`
-	Payload  string `json:"payload"`
+	ToPeer      string `json:"toPeer"`
+	ToPeerAlt   string `json:"to_peer,omitempty"`
+	FromPeer    string `json:"fromPeer"`
+	FromPeerAlt string `json:"from_peer,omitempty"`
+	Type        string `json:"type"`
+	SignalType  string `json:"signal_type,omitempty"`
+	Payload     string `json:"payload"`
 }
 
 var allowedOrigins = map[string]bool{
@@ -36,7 +39,7 @@ var allowedOrigins = map[string]bool{
 	"http://tauri.localhost":                 true,
 	"https://tauri.localhost":                true,
 	"asset://localhost":                      true,
-	"https://orbit-server-xbr5.onrender.com":        true,
+	"https://orbit-server-xbr5.onrender.com": true,
 	"https://orbit-server-kae6.onrender.com": true,
 	"https://orbit.dev":                      true,
 }
@@ -93,33 +96,79 @@ func (h *Hub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	defer conn.Close()
 
 	h.addConnection(projectID, userID, conn)
-	defer h.removeConnection(projectID, userID)
+	defer func() {
+		h.removeConnection(projectID, userID)
+		h.BroadcastToProject(projectID, SignalMessage{
+			FromPeer:    userID,
+			FromPeerAlt: userID,
+			Type:        "peer_disconnected",
+			SignalType:  "peer_disconnected",
+			Payload:     userID,
+		})
+	}()
 
 	log.Printf("[ws] peer %s connected to project %s", userID, projectID)
 
+	// Notify other peers in this project room that a peer joined
+	h.BroadcastToProject(projectID, SignalMessage{
+		FromPeer:    userID,
+		FromPeerAlt: userID,
+		Type:        "peer_connected",
+		SignalType:  "peer_connected",
+		Payload:     userID,
+	})
+
 	for {
-		var msg SignalMessage
-		if err := conn.ReadJSON(&msg); err != nil {
+		var raw map[string]interface{}
+		if err := conn.ReadJSON(&raw); err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
 				log.Printf("[ws] read error: %v", err)
 			}
 			break
 		}
 
-		if msg.ToPeer == "" || msg.Type == "" || msg.Payload == "" {
+		toPeer, _ := raw["toPeer"].(string)
+		if toPeer == "" {
+			toPeer, _ = raw["to_peer"].(string)
+		}
+
+		sigType, _ := raw["type"].(string)
+		if rawSigType, ok := raw["signal_type"].(string); ok && rawSigType != "" {
+			sigType = rawSigType
+		}
+
+		payload, _ := raw["payload"].(string)
+		if payload == "" {
+			if rawAddr, ok := raw["address"].(string); ok && rawAddr != "" {
+				payload = rawAddr
+				if sigType == "" {
+					sigType = "address"
+				}
+			}
+		}
+
+		if sigType == "" || (payload == "" && sigType != "ping" && sigType != "pong") {
 			continue
 		}
 
-		if err := h.db.SaveSignal(projectID, userID, msg.ToPeer, msg.Type, msg.Payload); err != nil {
-			log.Printf("[ws] save signal failed: %v", err)
-			continue
+		outMsg := SignalMessage{
+			ToPeer:      toPeer,
+			ToPeerAlt:   toPeer,
+			FromPeer:    userID,
+			FromPeerAlt: userID,
+			Type:        sigType,
+			SignalType:  sigType,
+			Payload:     payload,
 		}
 
-		h.deliverSignal(projectID, msg.ToPeer, SignalMessage{
-			FromPeer: userID,
-			Type:     msg.Type,
-			Payload:  msg.Payload,
-		})
+		if toPeer == "" || toPeer == "*" || toPeer == "all" {
+			h.BroadcastToProject(projectID, outMsg)
+		} else {
+			if err := h.db.SaveSignal(projectID, userID, toPeer, sigType, payload); err != nil {
+				log.Printf("[ws] save signal failed: %v", err)
+			}
+			h.deliverSignal(projectID, toPeer, outMsg)
+		}
 	}
 }
 
