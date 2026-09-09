@@ -598,6 +598,13 @@ func (p *pgStore) inviteMemberWithLimit(projectID, userID string, maxMembers int
 	return tx.Commit(ctx)
 }
 
+func (p *pgStore) removeProjectMember(projectID, userID string) error {
+	ctx, cancel := pgCtx()
+	defer cancel()
+	_, err := p.pool.Exec(ctx, `DELETE FROM project_members WHERE project_id = $1 AND user_id = $2`, projectID, userID)
+	return err
+}
+
 func (p *pgStore) getProjectMembers(projectID string) ([]models.ProjectMember, error) {
 	ctx, cancel := pgCtx()
 	defer cancel()

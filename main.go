@@ -203,6 +203,8 @@ func main() {
 			r.Post("/projects/join", projectHandler.JoinByToken)
 			r.Post("/projects/{id}/join", projectHandler.JoinProject)
 			r.Put("/projects/{id}/path", projectHandler.UpdateMemberPath)
+			r.Delete("/projects/{id}/members/{userId}", projectHandler.RemoveMember)
+			r.Post("/projects/{id}/leave", projectHandler.LeaveProject)
 			r.Post("/projects/{id}/messages", projectHandler.SendMessage)
 			r.Get("/projects/{id}/messages", projectHandler.ListMessages)
 			// Encrypted Cloud Relay: The Go server acts as a temporary "Dead Drop" vault.
@@ -277,11 +279,16 @@ func isAllowedOrigin(origin string) bool {
 	if allowedOrigins[origin] {
 		return true
 	}
-	// Audit Fix #17: Allow any localhost/127.0.0.1 port for local dev & orbit-web
-	if strings.HasPrefix(origin, "http://localhost") || strings.HasPrefix(origin, "http://127.0.0.1") || strings.HasPrefix(origin, "https://localhost") {
+	// Loopback origins only — allow any port on localhost/127.0.0.1 (dev +
+	// orbit-web) but never a similarly-named host like localhost.evil.com.
+	// A ":" cannot appear in a hostname, so the "http://localhost:" prefix is
+	// safe and bounded to the loopback host itself.
+	if origin == "http://localhost" || origin == "https://localhost" ||
+		strings.HasPrefix(origin, "http://localhost:") || strings.HasPrefix(origin, "https://localhost:") {
 		return true
 	}
-	if strings.HasSuffix(origin, ".onrender.com") || strings.HasSuffix(origin, ".vercel.app") {
+	if origin == "http://127.0.0.1" || origin == "https://127.0.0.1" ||
+		strings.HasPrefix(origin, "http://127.0.0.1:") || strings.HasPrefix(origin, "https://127.0.0.1:") {
 		return true
 	}
 	return false

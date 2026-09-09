@@ -571,6 +571,30 @@ func (db *DB) InviteMember(projectID, userID string) error {
 	return db.save()
 }
 
+func (db *DB) RemoveProjectMember(projectID, userID string) error {
+	if db.pg != nil {
+		return db.pg.removeProjectMember(projectID, userID)
+	}
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	members := db.data.ProjectMembers[projectID]
+	kept := members[:0]
+	for _, m := range members {
+		if m.UserID != userID {
+			kept = append(kept, m)
+		}
+	}
+	if len(kept) == len(members) {
+		return nil
+	}
+	if len(kept) == 0 {
+		delete(db.data.ProjectMembers, projectID)
+	} else {
+		db.data.ProjectMembers[projectID] = kept
+	}
+	return db.save()
+}
+
 func (db *DB) GetProjectMembers(projectID string) ([]models.ProjectMember, error) {
 	if db.pg != nil {
 		return db.pg.getProjectMembers(projectID)

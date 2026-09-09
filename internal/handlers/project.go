@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -182,7 +183,11 @@ func (h *ProjectHandler) JoinByToken(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "joined", "projectId": projectID})
 }
 
-// JoinProject allows an authenticated user to join a project directly via project ID
+// JoinProject allows an authenticated user to join a project by ID — but only
+// when they present the project's E2EE token (orbit-sec-...) from an invite
+// link. The token is compared in constant time so a guessed project ID alone
+// cannot grant membership. JoinByToken (orbit_inv_...) remains for invite-coded
+// links.
 func (h *ProjectHandler) JoinProject(w http.ResponseWriter, r *http.Request) {
 	userID := middleware.GetUserID(r)
 	if userID == "" {
@@ -199,6 +204,29 @@ func (h *ProjectHandler) JoinProject(w http.ResponseWriter, r *http.Request) {
 	project, err := h.db.GetProject(projectID)
 	if err != nil || project == nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "project not found"})
+		return
+	}
+
+	// The E2EE project token is only distributed via invite links, so it must be
+	// presented before membership (or re-verified membership) is granted.
+	r.Body = http.MaxBytesReader(w, r.Body, 8<<10)
+	var req struct {
+		Token string `json:"token"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+		return
+	}
+	if req.Token == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "E2EE project token (orbit-sec-...) is required to join this workspace"})
+		return
+	}
+	if project.ProjectToken == "" {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "this workspace has no E2EE token on file; ask the owner to rotate the project token and try again"})
+		return
+	}
+	if subtle.ConstantTimeCompare([]byte(req.Token), []byte(project.ProjectToken)) != 1 {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "invalid project token"})
 		return
 	}
 
@@ -324,6 +352,53 @@ func (h *ProjectHandler) DeleteProject(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
+// RemoveMember lets the project owner evict a collaborator. The removed member's
+// client detects the now-403 project endpoints on its next poll and performs a
+// local graceful exit (drops the project + cleans .orbit).
+func (h *ProjectHandler) RemoveMember(w http.ResponseWriter, r *http.Request) {
+	userID := middleware.GetUserID(r)
+	if userID == "" { writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"}); return }
+
+	projectID := chi.URLParam(r, "id")
+	targetID := chi.URLParam(r, "userId")
+	if projectID == "" || targetID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "project ID and user ID required"}); return
+	}
+	if !h.db.IsProjectOwner(projectID, userID) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "owner only"}); return
+	}
+	if targetID == userID {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "owners cannot remove themselves; delete the project instead"}); return
+	}
+
+	if err := h.db.RemoveProjectMember(projectID, targetID); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()}); return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "removed", "projectId": projectID})
+}
+
+// LeaveProject is the self-serve exit for collaborators: it removes only the
+// caller's membership and leaves the project + its data intact for the owner.
+// The caller's client then drops the workspace locally and cleans .orbit.
+func (h *ProjectHandler) LeaveProject(w http.ResponseWriter, r *http.Request) {
+	userID := middleware.GetUserID(r)
+	if userID == "" { writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"}); return }
+
+	projectID := chi.URLParam(r, "id")
+	if projectID == "" { writeJSON(w, http.StatusBadRequest, map[string]string{"error": "project ID required"}); return }
+	if !h.db.IsProjectMember(projectID, userID) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "not a member"}); return
+	}
+	if h.db.IsProjectOwner(projectID, userID) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "owners cannot leave; delete the project instead"}); return
+	}
+
+	if err := h.db.RemoveProjectMember(projectID, userID); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()}); return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "left", "projectId": projectID})
+}
+
 func (h *ProjectHandler) PullDeltas(w http.ResponseWriter, r *http.Request) {
 	userID := middleware.GetUserID(r)
 	if userID == "" { writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"}); return }
@@ -347,6 +422,26 @@ func (h *ProjectHandler) PullDeltas(w http.ResponseWriter, r *http.Request) {
 	deltas, err := h.db.GetDeltas(projectID, since)
 	if err != nil { writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()}); return }
 	if deltas == nil { deltas = []models.ProjectDelta{} }
+
+	// Bound every pull response (default 200, hard max 500) so a long-running
+	// project or a burst of pushes can never produce an unbounded reply. Deltas
+	// are stored oldest-first, so we keep the most recent `limit` entries.
+	const (
+		defaultPullLimit = 200
+		maxPullLimit     = 500
+	)
+	limit := defaultPullLimit
+	if q := r.URL.Query().Get("limit"); q != "" {
+		if parsed, perr := strconv.Atoi(q); perr == nil && parsed > 0 {
+			if parsed > maxPullLimit {
+				parsed = maxPullLimit
+			}
+			limit = parsed
+		}
+	}
+	if len(deltas) > limit {
+		deltas = deltas[len(deltas)-limit:]
+	}
 
 	sanitized := make([]models.ProjectDelta, len(deltas))
 	for i, d := range deltas {

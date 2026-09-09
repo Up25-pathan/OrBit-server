@@ -3,6 +3,7 @@ package middleware
 import (
 	"context"
 	"log/slog"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -90,18 +91,20 @@ func (rl *rateLimiter) allow(key string, maxTokens int, rate time.Duration) bool
 	return true
 }
 
+// getIP derives the client key from the socket peer address only. X-Forwarded-For
+// / X-Real-IP are client-controlled (or reverse-proxy controlled) and must not be
+// trusted: a caller could otherwise spoof a new header value per request to reset
+// their bucket (or to hammer someone else's bucket). If the server ever runs
+// behind a trusted proxy, the proxy's own IP becomes the shared key — acceptable
+// and bounded by the generous per-key capacities below.
 func getIP(r *http.Request) string {
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		return strings.Split(xff, ",")[0]
+	host := r.RemoteAddr
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	} else if idx := strings.LastIndex(host, ":"); idx != -1 {
+		host = host[:idx]
 	}
-	if xri := r.Header.Get("X-Real-IP"); xri != "" {
-		return xri
-	}
-	ip := r.RemoteAddr
-	if idx := strings.LastIndex(ip, ":"); idx != -1 {
-		ip = ip[:idx]
-	}
-	return ip
+	return strings.Trim(strings.TrimSpace(host), "[]")
 }
 
 func RateLimit(next http.Handler) http.Handler {

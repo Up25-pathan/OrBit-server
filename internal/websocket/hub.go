@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/gorilla/websocket"
@@ -49,10 +50,15 @@ func isAllowedOrigin(origin string) bool {
 	if allowedOrigins[origin] {
 		return true
 	}
-	if strings.HasPrefix(origin, "http://localhost") || strings.HasPrefix(origin, "http://127.0.0.1") || strings.HasPrefix(origin, "https://localhost") {
+	// Loopback origins only — any port on localhost/127.0.0.1, but never a
+	// similarly-named host (a ":" cannot appear in a hostname, so the
+	// "http://localhost:" prefix stays bounded to the loopback host).
+	if origin == "http://localhost" || origin == "https://localhost" ||
+		strings.HasPrefix(origin, "http://localhost:") || strings.HasPrefix(origin, "https://localhost:") {
 		return true
 	}
-	if strings.HasSuffix(origin, ".onrender.com") || strings.HasSuffix(origin, ".vercel.app") {
+	if origin == "http://127.0.0.1" || origin == "https://127.0.0.1" ||
+		strings.HasPrefix(origin, "http://127.0.0.1:") || strings.HasPrefix(origin, "https://127.0.0.1:") {
 		return true
 	}
 	return false
@@ -116,6 +122,30 @@ func (h *Hub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("[ws] peer %s (conn %s) connected to project %s", userID, connID, projectID)
 
+	// Membership is revalidated for the whole connection lifetime: a 30-second
+	// backstop plus a check before every relayed message, so a removed member's
+	// socket is torn down shortly after revocation instead of staying in the
+	// room indefinitely.
+	revalidateDone := make(chan struct{})
+	defer close(revalidateDone)
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-revalidateDone:
+				return
+			case <-ticker.C:
+				ok, err := h.isProjectMember(projectID, userID)
+				if err != nil || !ok {
+					log.Printf("[ws] closing conn %s for user %s: no longer a member of project %s", connID, userID, projectID)
+					conn.Close()
+					return
+				}
+			}
+		}
+	}()
+
 	// Notify other peer devices in this project room that a peer joined
 	h.BroadcastToProject(projectID, connID, SignalMessage{
 		FromPeer:    userID,
@@ -156,6 +186,14 @@ func (h *Hub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 		if sigType == "" || (payload == "" && sigType != "ping" && sigType != "pong") {
 			continue
+		}
+
+		// Must still be a member before any signal is relayed on their behalf.
+		isStillMember, memberErr := h.isProjectMember(projectID, userID)
+		if memberErr != nil || !isStillMember {
+			log.Printf("[ws] closing conn %s for user %s: membership revoked on project %s", connID, userID, projectID)
+			conn.Close()
+			break
 		}
 
 		outMsg := SignalMessage{
