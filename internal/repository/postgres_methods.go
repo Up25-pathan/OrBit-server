@@ -734,7 +734,62 @@ func (p *pgStore) getDeltas(projectID string, since time.Time) ([]models.Project
 func (p *pgStore) sweepExpiredDeltas(ttl time.Duration) int {
 	ctx, cancel := pgCtx()
 	defer cancel()
-	ct, err := p.pool.Exec(ctx, `DELETE FROM deltas WHERE created_at < $1`, time.Now().UTC().Add(-ttl))
+	totalSwept := 0
+
+	// 1. Purge deltas where all active recipient peers have acknowledged
+	if ct, err := p.pool.Exec(ctx, `
+		DELETE FROM deltas d
+		WHERE (
+			SELECT COUNT(*) FROM project_members pm WHERE pm.project_id = d.project_id AND pm.user_id <> d.author_id
+		) > 0
+		AND (
+			SELECT COUNT(*) FROM delta_acks da WHERE da.delta_id = d.id
+		) >= (
+			SELECT COUNT(*) FROM project_members pm WHERE pm.project_id = d.project_id AND pm.user_id <> d.author_id
+		)
+	`); err == nil {
+		totalSwept += int(ct.RowsAffected())
+	}
+
+	// 2. Purge solo-project deltas (no other member exists to ever receive or ack it)
+	if ct, err := p.pool.Exec(ctx, `
+		DELETE FROM deltas d
+		WHERE (
+			SELECT COUNT(*) FROM project_members pm WHERE pm.project_id = d.project_id AND pm.user_id <> d.author_id
+		) = 0
+	`); err == nil {
+		totalSwept += int(ct.RowsAffected())
+	}
+
+	// 3. Purge orphaned deltas belonging to deleted projects
+	if ct, err := p.pool.Exec(ctx, `
+		DELETE FROM deltas WHERE project_id NOT IN (SELECT id FROM projects)
+	`); err == nil {
+		totalSwept += int(ct.RowsAffected())
+	}
+
+	// 4. If TTL is set (or zero for force sweep), purge remaining deltas
+	if ttl <= 0 {
+		if ct, err := p.pool.Exec(ctx, `DELETE FROM deltas`); err == nil {
+			totalSwept += int(ct.RowsAffected())
+		}
+	} else {
+		if ct, err := p.pool.Exec(ctx, `DELETE FROM deltas WHERE created_at < $1`, time.Now().UTC().Add(-ttl)); err == nil {
+			totalSwept += int(ct.RowsAffected())
+		}
+	}
+
+	return totalSwept
+}
+
+func (p *pgStore) sweepOrphanedProjects(maxAge time.Duration) int {
+	ctx, cancel := pgCtx()
+	defer cancel()
+	ct, err := p.pool.Exec(ctx, `
+		DELETE FROM projects 
+		WHERE created_at < $1 
+		  AND id NOT IN (SELECT DISTINCT project_id FROM deltas)
+	`, time.Now().UTC().Add(-maxAge))
 	if err != nil {
 		return 0
 	}

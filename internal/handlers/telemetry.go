@@ -78,11 +78,15 @@ func (h *TelemetryHandler) TriggerSweep(w http.ResponseWriter, r *http.Request) 
 	h.db.SweepExpiredSignals(30 * time.Minute)
 	h.db.MessageSweep()
 	h.db.ActivityLogSweep()
+	deltasSwept := h.db.SweepExpiredDeltas(0) // Full Zero-Storage Delta sweep
+	orphansSwept := h.db.SweepOrphanedProjects(24 * time.Hour)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"status":  "success",
-		"message": "Maintenance sweeps completed",
+		"status":         "success",
+		"message":        "Maintenance sweeps completed",
+		"deltas_swept":   deltasSwept,
+		"orphans_swept":  orphansSwept,
 	})
 }

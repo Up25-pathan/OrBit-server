@@ -785,6 +785,9 @@ func (db *DB) StartDeltaSweeperWithCtx(ctx context.Context) {
 // SweepOrphanedProjects removes projects that are older than maxAge and have 0 deltas.
 // This cleans up projects where the local daemon failed to initialize the workspace.
 func (db *DB) SweepOrphanedProjects(maxAge time.Duration) int {
+	if db.pg != nil {
+		return db.pg.sweepOrphanedProjects(maxAge)
+	}
 	db.mu.Lock()
 	now := time.Now()
 	var orphaned []string
