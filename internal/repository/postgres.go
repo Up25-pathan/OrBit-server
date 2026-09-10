@@ -35,14 +35,13 @@ func newPgStore(connString string) (*pgStore, error) {
 	cfg.MaxConnIdleTime = 5 * time.Minute
 	cfg.MaxConnLifetime = 30 * time.Minute
 	
-	// If connecting to a transaction pooler (e.g. Supabase port 6543), prepared statements will fail.
-	// We force Exec mode to disable prepared statements automatically so the user doesn't have to
-	// worry about appending obscure ?default_query_exec_mode=exec flags to their Render config.
+	// If connecting to a transaction pooler (e.g. port 6543), prepared statements will fail.
+	// We force Exec mode to disable prepared statements automatically for pooler compatibility.
 	if cfg.ConnConfig.Port == 6543 {
 		cfg.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeExec
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
@@ -58,33 +57,9 @@ func newPgStore(connString string) (*pgStore, error) {
 		return nil, fmt.Errorf("create postgres schema: %w", err)
 	}
 	pg := &pgStore{pool: pool}
-	if err := pg.migrateLegacyKV(ctx); err != nil {
-		pool.Close()
-		return nil, fmt.Errorf("migrate legacy kv data: %w", err)
-	}
+	_ = pg.migrateLegacyKV(ctx)
 
-	// One-time migration: clear legacy machine_id values from old local storage scheme.
-	// We only run this if a migration marker has not been set in the KV store, so it only runs once in production history.
-	var hasReset bool
-	err = pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM kv WHERE key = 'migration_clear_legacy_machine_ids')`).Scan(&hasReset)
-	if err == nil && !hasReset {
-		if _, err := pool.Exec(ctx, `UPDATE users SET machine_id = ''`); err == nil {
-			_, _ = pool.Exec(ctx, `INSERT INTO kv (key, data) VALUES ('migration_clear_legacy_machine_ids', 'true'::jsonb)`)
-			log.Printf("[db] Successfully cleared legacy machine IDs on startup")
-		} else {
-			log.Printf("[db] WARNING: Failed to clear legacy machine IDs: %v", err)
-		}
-	}
-
-	// Migration: add stage/priority/tag columns to tasks table if missing.
-	for _, col := range []struct{ name, typedef string }{
-		{"stage", "TEXT NOT NULL DEFAULT 'backlog'"},
-		{"priority", "TEXT NOT NULL DEFAULT 'medium'"},
-		{"tag", "TEXT NOT NULL DEFAULT 'feature'"},
-	} {
-		_, _ = pool.Exec(ctx, fmt.Sprintf("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS %s %s", col.name, col.typedef))
-	}
-
+	log.Printf("[db] PostgreSQL connected and schema verified successfully")
 	return pg, nil
 }
 

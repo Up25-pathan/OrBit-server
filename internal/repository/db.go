@@ -66,10 +66,11 @@ func New(path string) (*DB, error) {
 	// filesystem is ephemeral). Without DATABASE_URL the original JSON file
 	// store is used, so local development is unchanged.
 	if conn := os.Getenv("DATABASE_URL"); conn != "" {
-		// Render deployment fix: Render does not support IPv6 outbound.
-		// Supabase requires IPv6 on port 5432, so we intercept and force 
-		// the IPv4 Transaction Pooler on port 6543.
-		conn = strings.Replace(conn, ":5432", ":6543", 1)
+		// If connecting to Supabase direct port on Render (which lacks IPv6),
+		// rewrite port 5432 to the IPv4 Transaction Pooler port 6543.
+		if strings.Contains(conn, "supabase.co") || strings.Contains(conn, "supabase.com") {
+			conn = strings.Replace(conn, ":5432", ":6543", 1)
+		}
 		
 		pg, err := newPgStore(conn)
 		if err != nil {
