@@ -1279,18 +1279,23 @@ func (db *DB) ActivityLogSweep() {
 }
 
 type TelemetryStats struct {
-	UsersCount         int   `json:"usersCount"`
-	ProjectsCount      int   `json:"projectsCount"`
-	MessagesCount      int   `json:"messagesCount"`
-	LicensesCount      int   `json:"licensesCount"`
-	DeltaBlobsCount    int   `json:"deltaBlobsCount"`
-	DeltaSizeBytes     int64 `json:"deltaSizeBytes"`
-	WebRTCSignalsCount int   `json:"webrtcSignalsCount"`
+	Engine             string `json:"engine"`
+	DatabaseType       string `json:"databaseType"`
+	UsersCount         int    `json:"usersCount"`
+	ProjectsCount      int    `json:"projectsCount"`
+	MessagesCount      int    `json:"messagesCount"`
+	LicensesCount      int    `json:"licensesCount"`
+	DeltaBlobsCount    int    `json:"deltaBlobsCount"`
+	DeltaSizeBytes     int64  `json:"deltaSizeBytes"`
+	WebRTCSignalsCount int    `json:"webrtcSignalsCount"`
 }
 
 func (db *DB) GetTelemetryStats() TelemetryStats {
 	if db.pg != nil {
-		return db.pg.telemetryStats()
+		stats := db.pg.telemetryStats()
+		stats.Engine = "PostgreSQL (Aiven/Managed)"
+		stats.DatabaseType = "PostgreSQL"
+		return stats
 	}
 	db.mu.RLock()
 	defer db.mu.RUnlock()
@@ -1305,6 +1310,8 @@ func (db *DB) GetTelemetryStats() TelemetryStats {
 	}
 
 	return TelemetryStats{
+		Engine:             "Local (orbit.db)",
+		DatabaseType:       "Local",
 		UsersCount:         len(db.data.Users),
 		ProjectsCount:      len(db.data.Projects),
 		MessagesCount:      len(db.data.Messages),
