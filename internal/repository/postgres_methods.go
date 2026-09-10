@@ -664,11 +664,42 @@ func (p *pgStore) storeDelta(projectID, authorID, data string) (*models.ProjectD
 func (p *pgStore) ackDelta(projectID, deltaID, userID string) error {
 	ctx, cancel := pgCtx()
 	defer cancel()
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
 
-	// Record that userID has acknowledged this delta.
-	// Deltas are retained for new member clones and multi-device sync, and cleaned up via TTL sweep.
-	_, err := p.pool.Exec(ctx, `INSERT INTO delta_acks (delta_id, user_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, deltaID, userID)
-	return err
+	var authorID string
+	err = tx.QueryRow(ctx, `SELECT author_id FROM deltas WHERE id = $1 AND project_id = $2 FOR UPDATE`, deltaID, projectID).Scan(&authorID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
+	if authorID != userID {
+		if _, err := tx.Exec(ctx, `INSERT INTO delta_acks (delta_id, user_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, deltaID, userID); err != nil {
+			return err
+		}
+	}
+
+	var needed, acked int
+	if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM project_members WHERE project_id = $1 AND user_id <> $2`, projectID, authorID).Scan(&needed); err != nil {
+		return err
+	}
+	if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM delta_acks WHERE delta_id = $1`, deltaID).Scan(&acked); err != nil {
+		return err
+	}
+
+	// Zero-storage auto-delete: as soon as all active recipient members have acked, purge the delta from the relay!
+	if needed > 0 && acked >= needed {
+		if _, err := tx.Exec(ctx, `DELETE FROM deltas WHERE id = $1`, deltaID); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
 }
 
 func (p *pgStore) getDeltas(projectID string, since time.Time) ([]models.ProjectDelta, error) {

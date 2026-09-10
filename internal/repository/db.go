@@ -655,15 +655,39 @@ func (db *DB) AckDelta(projectID, deltaID, userID string) error {
 	defer db.mu.Unlock()
 
 	deltas := db.data.Deltas[projectID]
+	members := db.data.ProjectMembers[projectID]
+	memberCount := len(members)
+
+	var kept []models.ProjectDelta
 	changed := false
-	for i := range deltas {
-		if deltas[i].ID == deltaID {
-			if deltas[i].AuthorID != userID && !sliceContains(deltas[i].AckedBy, userID) {
-				deltas[i].AckedBy = append(deltas[i].AckedBy, userID)
-				changed = true
-			}
-			break
+	for _, d := range deltas {
+		if d.ID != deltaID {
+			kept = append(kept, d)
+			continue
 		}
+		if d.AuthorID != userID && !sliceContains(d.AckedBy, userID) {
+			d.AckedBy = append(d.AckedBy, userID)
+			changed = true
+		}
+		neededAcks := memberCount
+		for _, m := range members {
+			if m.UserID == d.AuthorID {
+				neededAcks--
+				break
+			}
+		}
+		if neededAcks > 0 && len(d.AckedBy) >= neededAcks {
+			// All required recipients acked — purge blob immediately!
+			changed = true
+		} else {
+			kept = append(kept, d)
+		}
+	}
+
+	if len(kept) == 0 {
+		delete(db.data.Deltas, projectID)
+	} else {
+		db.data.Deltas[projectID] = kept
 	}
 
 	if !changed {
