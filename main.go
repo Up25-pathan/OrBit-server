@@ -45,7 +45,7 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
 
-	// Encrypted Cloud Relay: Start background sweeper to purge expired delta blobs (7-day TTL)
+	// Encrypted Cloud Relay: Start background sweeper to purge expired delta blobs (3-day TTL)
 	db.StartDeltaSweeperWithCtx(ctx)
 
 	// Orphaned Projects: Start background sweeper to purge empty/failed project creations

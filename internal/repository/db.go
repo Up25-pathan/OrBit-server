@@ -681,7 +681,7 @@ func (db *DB) AckDelta(projectID, deltaID, userID string) error {
 		// The author already has the content, so the blob only needs an ack from
 		// every CURRENT member EXCEPT the author. Without this, a delta could
 		// never reach memberCount (the client never acks its own pushes) and the
-		// relay blob would accumulate until the 7-day sweep.
+		// relay blob would accumulate until the 3-day sweep.
 		neededAcks := memberCount
 		for _, m := range members {
 			if m.UserID == d.AuthorID {
@@ -734,7 +734,7 @@ func (db *DB) GetDeltas(projectID string, since time.Time) ([]models.ProjectDelt
 	return result, nil
 }
 
-// SweepExpiredDeltas removes all encrypted relay blobs older than the TTL (7 days).
+// SweepExpiredDeltas removes all encrypted relay blobs older than the TTL (3 days).
 // This is the "Rolling Window" approach from the Encrypted Cloud Relay spec.
 func (db *DB) SweepExpiredDeltas(ttl time.Duration) int {
 	if db.pg != nil {
@@ -770,10 +770,10 @@ func (db *DB) SweepExpiredDeltas(ttl time.Duration) int {
 }
 
 // StartDeltaSweeperWithCtx launches a background goroutine that periodically purges
-// expired encrypted relay blobs. It runs every hour with a 7-day TTL.
+// expired encrypted relay blobs. It runs every hour with a 3-day TTL.
 // The goroutine stops when ctx is cancelled.
 func (db *DB) StartDeltaSweeperWithCtx(ctx context.Context) {
-	const deltaTTL = 7 * 24 * time.Hour
+	const deltaTTL = 3 * 24 * time.Hour
 	const sweepInterval = 1 * time.Hour
 
 	go func() {
