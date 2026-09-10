@@ -188,19 +188,13 @@ func (db *DB) UpsertUser(id, name, email, avatarURL, planTier, licenseKey, machi
 	now := time.Now().UTC()
 	existing := db.data.Users[id]
 	if existing != nil {
-		if existing.MachineID != "" && existing.MachineID != machineID {
-			db.mu.Unlock()
-			return nil, fmt.Errorf("license is already bound to another device")
-		}
 		existing.DisplayName = name
 		existing.Email = email
 		if avatarURL != "" {
 			existing.AvatarURL = avatarURL
 		}
 		existing.PlanTier = planTier
-		if existing.MachineID == "" {
-			existing.MachineID = machineID
-		}
+		existing.MachineID = machineID
 		existing.UpdatedAt = now
 	} else {
 		existing = &models.User{
@@ -652,63 +646,29 @@ func (db *DB) StoreDelta(projectID, authorID, data string) (*models.ProjectDelta
 
 // AckDelta marks a relay delta as applied by userID. Once every current project
 // member has acked the same delta, the blob is removed from the relay so pushed
-// data is cleared once all peers are on the same update.
+// AckDelta marks a relay delta as applied by userID.
 func (db *DB) AckDelta(projectID, deltaID, userID string) error {
 	if db.pg != nil {
 		return db.pg.ackDelta(projectID, deltaID, userID)
 	}
 	db.mu.Lock()
+	defer db.mu.Unlock()
 
 	deltas := db.data.Deltas[projectID]
-	members := db.data.ProjectMembers[projectID]
-	memberCount := len(members)
-	if memberCount == 0 {
-		memberCount = 1
-	}
-
-	var kept []models.ProjectDelta
 	changed := false
-	for _, d := range deltas {
-		if d.ID != deltaID {
-			kept = append(kept, d)
-			continue
-		}
-		// The author already has the content, so their own ack must never count —
-		// only ack from current members OTHER than the author.
-		if d.AuthorID != userID && !sliceContains(d.AckedBy, userID) {
-			d.AckedBy = append(d.AckedBy, userID)
-			changed = true
-		}
-		// The author already has the content, so the blob only needs an ack from
-		// every CURRENT member EXCEPT the author. Without this, a delta could
-		// never reach memberCount (the client never acks its own pushes) and the
-		// relay blob would accumulate until the 3-day sweep.
-		neededAcks := memberCount
-		for _, m := range members {
-			if m.UserID == d.AuthorID {
-				neededAcks--
-				break
+	for i := range deltas {
+		if deltas[i].ID == deltaID {
+			if deltas[i].AuthorID != userID && !sliceContains(deltas[i].AckedBy, userID) {
+				deltas[i].AckedBy = append(deltas[i].AckedBy, userID)
+				changed = true
 			}
+			break
 		}
-		if len(d.AckedBy) < neededAcks {
-			kept = append(kept, d)
-		} else {
-			// All required peers acked — drop the blob entirely
-			changed = true
-		}
-	}
-
-	if len(kept) == 0 {
-		delete(db.data.Deltas, projectID)
-	} else {
-		db.data.Deltas[projectID] = kept
 	}
 
 	if !changed {
-		db.mu.Unlock()
 		return nil
 	}
-	db.mu.Unlock()
 	return db.save()
 }
 

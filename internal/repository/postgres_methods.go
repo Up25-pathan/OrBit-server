@@ -218,15 +218,6 @@ func (p *pgStore) upsertUser(id, name, email, avatarURL, planTier, licenseKey, m
 	}
 	defer tx.Rollback(ctx)
 
-	var existingMachineID string
-	err = tx.QueryRow(ctx, `SELECT machine_id FROM users WHERE id = $1 FOR UPDATE`, id).Scan(&existingMachineID)
-	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-		return nil, err
-	}
-	if err == nil && existingMachineID != "" && existingMachineID != machineID {
-		return nil, fmt.Errorf("license is already bound to another device")
-	}
-
 	now := time.Now().UTC()
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO users (id, display_name, email, plan_tier, bio, status, activity, avatar_url, public_key_fingerprint, machine_id, created_at, updated_at)
@@ -236,7 +227,7 @@ func (p *pgStore) upsertUser(id, name, email, avatarURL, planTier, licenseKey, m
 			email = EXCLUDED.email,
 			plan_tier = EXCLUDED.plan_tier,
 			avatar_url = CASE WHEN EXCLUDED.avatar_url <> '' THEN EXCLUDED.avatar_url ELSE users.avatar_url END,
-			machine_id = CASE WHEN users.machine_id = '' THEN EXCLUDED.machine_id ELSE users.machine_id END,
+			machine_id = EXCLUDED.machine_id,
 			updated_at = EXCLUDED.updated_at`,
 		id, name, email, planTier, avatarURL, machineID, now); err != nil {
 		return nil, err
@@ -673,38 +664,11 @@ func (p *pgStore) storeDelta(projectID, authorID, data string) (*models.ProjectD
 func (p *pgStore) ackDelta(projectID, deltaID, userID string) error {
 	ctx, cancel := pgCtx()
 	defer cancel()
-	tx, err := p.pool.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(ctx)
 
-	var authorID string
-	err = tx.QueryRow(ctx, `SELECT author_id FROM deltas WHERE id = $1 AND project_id = $2 FOR UPDATE`, deltaID, projectID).Scan(&authorID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	if authorID != userID {
-		if _, err := tx.Exec(ctx, `INSERT INTO delta_acks (delta_id, user_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, deltaID, userID); err != nil {
-			return err
-		}
-	}
-	var needed, acked int
-	if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM project_members WHERE project_id = $1 AND user_id <> $2`, projectID, authorID).Scan(&needed); err != nil {
-		return err
-	}
-	if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM delta_acks WHERE delta_id = $1`, deltaID).Scan(&acked); err != nil {
-		return err
-	}
-	if acked >= needed {
-		if _, err := tx.Exec(ctx, `DELETE FROM deltas WHERE id = $1`, deltaID); err != nil {
-			return err
-		}
-	}
-	return tx.Commit(ctx)
+	// Record that userID has acknowledged this delta.
+	// Deltas are retained for new member clones and multi-device sync, and cleaned up via TTL sweep.
+	_, err := p.pool.Exec(ctx, `INSERT INTO delta_acks (delta_id, user_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, deltaID, userID)
+	return err
 }
 
 func (p *pgStore) getDeltas(projectID string, since time.Time) ([]models.ProjectDelta, error) {
