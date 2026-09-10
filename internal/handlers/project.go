@@ -426,9 +426,15 @@ func (h *ProjectHandler) PullDeltas(w http.ResponseWriter, r *http.Request) {
 	// Bound every pull response (default 200, hard max 500) so a long-running
 	// project or a burst of pushes can never produce an unbounded reply. Deltas
 	// are stored oldest-first, so we keep the most recent `limit` entries.
+	//
+	// Bootstrap carve-out: when NO `since` cursor is supplied the caller is a
+	// fresh device rebuilding the project from scratch (relay-only clone), which
+	// needs the complete history — so the much larger ceiling applies there.
+	// Incremental polls always send a cursor and stay bounded to 200/500.
 	const (
 		defaultPullLimit = 200
 		maxPullLimit     = 500
+		bootstrapCeiling = 5000 // relay bootstrap: whole (bounded) history
 	)
 	limit := defaultPullLimit
 	if q := r.URL.Query().Get("limit"); q != "" {
@@ -438,6 +444,8 @@ func (h *ProjectHandler) PullDeltas(w http.ResponseWriter, r *http.Request) {
 			}
 			limit = parsed
 		}
+	} else if sinceStr == "" {
+		limit = bootstrapCeiling
 	}
 	if len(deltas) > limit {
 		deltas = deltas[len(deltas)-limit:]
