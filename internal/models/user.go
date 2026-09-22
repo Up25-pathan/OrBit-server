@@ -13,8 +13,8 @@ type User struct {
 	AvatarURL            string    `json:"avatarUrl,omitempty"`
 	PublicKeyFingerprint string    `json:"publicKeyFingerprint,omitempty"`
 	MachineID            string    `json:"machineId,omitempty"`
-	Price                float64   `json:"price,omitempty"`
-	ExpiresAt            time.Time `json:"expiresAt,omitempty"`
+	Price                float64   `json:"price"`
+	ExpiresAt            time.Time `json:"expiresAt"`
 	LastSeen             time.Time `json:"-"`
 	CreatedAt            time.Time `json:"createdAt"`
 	UpdatedAt            time.Time `json:"updatedAt"`
