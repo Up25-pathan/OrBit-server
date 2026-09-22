@@ -31,7 +31,7 @@ type webVerifyResponse struct {
 
 func NewWebsiteValidator(websiteURL string, serverSecret string) *WebsiteValidator {
 	if websiteURL == "" {
-		websiteURL = "https://orbit-server-xbr5.onrender.com"
+		websiteURL = "https://orbit-sync.onrender.com"
 	}
 	return &WebsiteValidator{
 		WebsiteURL:   strings.TrimRight(websiteURL, "/"),
