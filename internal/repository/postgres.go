@@ -85,6 +85,8 @@ CREATE TABLE IF NOT EXISTS users (
 	avatar_url TEXT NOT NULL DEFAULT '',
 	public_key_fingerprint TEXT NOT NULL DEFAULT '',
 	machine_id TEXT NOT NULL DEFAULT '',
+	price REAL NOT NULL DEFAULT 0,
+	expires_at TIMESTAMPTZ,
 	last_seen TIMESTAMPTZ,
 	created_at TIMESTAMPTZ NOT NULL,
 	updated_at TIMESTAMPTZ NOT NULL
@@ -163,6 +165,11 @@ CREATE TABLE IF NOT EXISTS delta_acks (
 	PRIMARY KEY(delta_id, user_id)
 );
 
+CREATE TABLE IF NOT EXISTS delta_watermarks (
+	project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+	purged_through TIMESTAMPTZ NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS activity_logs (
 	id TEXT PRIMARY KEY,
 	user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -229,6 +236,7 @@ func kvRows(s *store) []kvRow {
 		{"activityLogs", s.ActivityLogs},
 		{"messages", s.Messages},
 		{"signals", s.Signals},
+		{"deltaWatermarks", s.DeltaWatermarks},
 	}
 }
 
@@ -277,6 +285,8 @@ func unmarshalKey(key string, data []byte, s *store) error {
 		return json.Unmarshal(data, &s.Messages)
 	case "signals":
 		return json.Unmarshal(data, &s.Signals)
+	case "deltaWatermarks":
+		return json.Unmarshal(data, &s.DeltaWatermarks)
 	default:
 		// Unknown rows are ignored so a future schema extension never breaks
 		// an older binary on startup.

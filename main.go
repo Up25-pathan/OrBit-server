@@ -107,6 +107,44 @@ func main() {
 	validator := license.NewWebsiteValidator(cfg.WebsiteURL, cfg.ServerSecret)
 	log.Printf("[License Authority] Verifying licenses against Website Server at %s", cfg.WebsiteURL)
 
+	// License Expiration Sweeper: Periodically check if Pro/Enterprise users have expired
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ticker := time.NewTicker(24 * time.Hour) // Run daily
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				users, err := db.GetAllUsers()
+				if err != nil {
+					log.Printf("[license-sweeper] Failed to get users: %v", err)
+					continue
+				}
+				for _, u := range users {
+					if u.PlanTier == "free" {
+						continue // Already free, ignore
+					}
+					key := db.GetLicenseKeyByUserID(u.ID)
+					if key == "" {
+						db.DowngradeUserTier(u.ID)
+						continue
+					}
+					_, err := validator.Validate(key, u.MachineID)
+					if err != nil {
+						// If the error indicates expiration or limit reached, downgrade them
+						if strings.Contains(err.Error(), "expired") || strings.Contains(err.Error(), "inactive") || strings.Contains(err.Error(), "not found") {
+							log.Printf("[license-sweeper] Downgrading expired user %s (%s)", u.ID, u.Email)
+							db.DowngradeUserTier(u.ID)
+						}
+					}
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
 	authHandler := handlers.NewAuthHandler(db, validator, jwtSecret, cfg.JWTExpiry)
 	userHandler := handlers.NewUserHandler(db, validator)
 	friendHandler := handlers.NewFriendHandler(db)
@@ -307,6 +345,7 @@ func corsMiddleware(next http.Handler) http.Handler {
 		w.Header().Set("Vary", "Origin")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		w.Header().Set("Access-Control-Expose-Headers", "X-Orbit-Delta-Gap")
 		w.Header().Set("Access-Control-Max-Age", "86400")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)

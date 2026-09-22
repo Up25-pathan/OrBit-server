@@ -1,10 +1,10 @@
 package license
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 )
@@ -23,8 +23,10 @@ type webVerifyResponse struct {
 	DisplayName string `json:"displayName"`
 	AvatarURL   string `json:"avatarUrl"`
 	Email       string `json:"email"`
-	PlanTier    string `json:"planTier"`
-	Error       string `json:"error"`
+	PlanTier    string  `json:"planTier"`
+	Price       float64 `json:"price"`
+	ExpiresAt   string  `json:"expiresAt"`
+	Error       string  `json:"error"`
 }
 
 func NewWebsiteValidator(websiteURL string, serverSecret string) *WebsiteValidator {
@@ -38,19 +40,27 @@ func NewWebsiteValidator(websiteURL string, serverSecret string) *WebsiteValidat
 	}
 }
 
-func (w *WebsiteValidator) Validate(key string) (*LicenseInfo, error) {
+func (w *WebsiteValidator) Validate(key string, deviceId string) (*LicenseInfo, error) {
 	cleanKey := strings.TrimSpace(key)
 	if cleanKey == "" {
 		return nil, fmt.Errorf("license key is empty")
 	}
 
-	// 2. Query live Website Server verification authority API
-	reqURL := fmt.Sprintf("%s/api/v1/licenses/verify?key=%s", w.WebsiteURL, url.QueryEscape(cleanKey))
-	req, err := http.NewRequest(http.MethodGet, reqURL, nil)
+	reqBody, _ := json.Marshal(map[string]string{
+		"licenseKey": cleanKey,
+		"deviceId":   deviceId,
+		"hostname":   "peer-node",
+		"platform":   "desktop",
+	})
+
+	// 2. Query live Website Server verification authority API via POST
+	reqURL := fmt.Sprintf("%s/api/v1/licenses/verify", w.WebsiteURL)
+	req, err := http.NewRequest(http.MethodPost, reqURL, bytes.NewBuffer(reqBody))
 	if err != nil {
 		return nil, fmt.Errorf("failed to build license request: %w", err)
 	}
 
+	req.Header.Set("Content-Type", "application/json")
 	if w.ServerSecret != "" {
 		req.Header.Set("X-Control-Server-Secret", w.ServerSecret)
 	}
@@ -61,6 +71,9 @@ func (w *WebsiteValidator) Validate(key string) (*LicenseInfo, error) {
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusConflict {
+		return nil, fmt.Errorf("license is already bound to maximum allowed devices")
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("license verification failed with status %d", resp.StatusCode)
 	}
@@ -83,11 +96,18 @@ func (w *WebsiteValidator) Validate(key string) (*LicenseInfo, error) {
 		name = data.Email
 	}
 
+	var expires time.Time
+	if data.ExpiresAt != "" {
+		expires, _ = time.Parse(time.RFC3339, data.ExpiresAt)
+	}
+
 	return &LicenseInfo{
 		UserID:    data.UserID,
 		Name:      name,
 		Email:     data.Email,
 		AvatarURL: data.AvatarURL,
 		PlanTier:  data.PlanTier,
+		Price:     data.Price,
+		ExpiresAt: expires,
 	}, nil
 }

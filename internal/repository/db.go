@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -15,6 +16,10 @@ import (
 
 	"github.com/orbit/control-server/internal/models"
 )
+
+// ErrMemberLimitReached is returned when a project is at its tier's member cap.
+// Handlers translate it into a tier-specific status message.
+var ErrMemberLimitReached = errors.New("member limit reached")
 
 type store struct {
 	Users          map[string]*models.User           `json:"users"`
@@ -28,6 +33,7 @@ type store struct {
 	ActivityLogs   []models.ActivityLog               `json:"activityLogs"`
 	Messages       map[string][]*models.ChatMessage   `json:"messages"`
 	Signals        []Signal                           `json:"signals"`
+	DeltaWatermarks map[string]time.Time              `json:"deltaWatermarks,omitempty"` // projectID → newest delta created_at that was purged from the relay
 }
 
 type Signal struct {
@@ -60,6 +66,7 @@ func New(path string) (*DB, error) {
 		ActivityLogs:   []models.ActivityLog{},
 		Messages:       make(map[string][]*models.ChatMessage),
 		Signals:        []Signal{},
+		DeltaWatermarks: make(map[string]time.Time),
 	}}
 
 	// Postgres mode is durable across restarts and redeploys (Render's local
@@ -180,11 +187,14 @@ func generateID(prefix string) string {
 
 // UpsertUser creates a new user or updates an existing one based on the stable UserID
 // from the license validator. No passwords. No bcrypt.
-func (db *DB) UpsertUser(id, name, email, avatarURL, planTier, licenseKey, machineID string) (*models.User, error) {
+func (db *DB) UpsertUser(id, name, email, avatarURL, planTier, licenseKey, machineID string, price float64, expiresAt time.Time) (*models.User, error) {
 	if db.pg != nil {
-		return db.pg.upsertUser(id, name, email, avatarURL, planTier, licenseKey, machineID)
+		return db.pg.upsertUser(id, name, email, avatarURL, planTier, licenseKey, machineID, price, expiresAt)
 	}
 	db.mu.Lock()
+	if db.data.Users == nil { db.data.Users = make(map[string]*models.User) }
+	if db.data.LicenseIndex == nil { db.data.LicenseIndex = make(map[string]string) }
+
 	now := time.Now().UTC()
 	existing := db.data.Users[id]
 	if existing != nil {
@@ -195,6 +205,8 @@ func (db *DB) UpsertUser(id, name, email, avatarURL, planTier, licenseKey, machi
 		}
 		existing.PlanTier = planTier
 		existing.MachineID = machineID
+		existing.Price = price
+		existing.ExpiresAt = expiresAt
 		existing.UpdatedAt = now
 	} else {
 		existing = &models.User{
@@ -206,6 +218,8 @@ func (db *DB) UpsertUser(id, name, email, avatarURL, planTier, licenseKey, machi
 			Bio:         "",
 			Status:      "online",
 			MachineID:   machineID,
+			Price:       price,
+			ExpiresAt:   expiresAt,
 			CreatedAt:   now,
 			UpdatedAt:   now,
 		}
@@ -266,6 +280,35 @@ func (db *DB) GetUserByID(id string) (*models.User, error) {
 	if user == nil { return nil, nil }
 	u := *user
 	return &u, nil
+}
+
+func (db *DB) GetAllUsers() ([]models.User, error) {
+	if db.pg != nil {
+		return db.pg.getAllUsers()
+	}
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	users := make([]models.User, 0, len(db.data.Users))
+	for _, u := range db.data.Users {
+		users = append(users, *u)
+	}
+	return users, nil
+}
+
+func (db *DB) DowngradeUserTier(id string) error {
+	if db.pg != nil {
+		return db.pg.downgradeUserTier(id)
+	}
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	user := db.data.Users[id]
+	if user != nil {
+		user.PlanTier = "free"
+		return db.save()
+	}
+	return nil
 }
 
 func (db *DB) SearchUsers(query string, limit int) ([]models.UserSearchResult, error) {
@@ -553,17 +596,54 @@ func (db *DB) InviteMember(projectID, userID string) error {
 	if db.pg != nil {
 		return db.pg.inviteMember(projectID, userID)
 	}
+	return db.inviteMemberJSON(projectID, userID, -1)
+}
+
+// InviteMemberWithLimit enforces the tier's member cap atomically (both PG and
+// JSON modes). maxMembers includes the owner. A no-op if already a member.
+func (db *DB) InviteMemberWithLimit(projectID, userID string, maxMembers int) error {
+	if db.pg != nil {
+		return db.pg.inviteMemberWithLimit(projectID, userID, maxMembers)
+	}
+	return db.inviteMemberJSON(projectID, userID, maxMembers)
+}
+
+func (db *DB) inviteMemberJSON(projectID, userID string, maxMembers int) error {
 	db.mu.Lock()
 	if db.data.Users[userID] == nil { db.mu.Unlock(); return fmt.Errorf("user not found") }
 	members := db.data.ProjectMembers[projectID]
 	for _, m := range members {
 		if m.UserID == userID { db.mu.Unlock(); return nil }
 	}
+	if maxMembers >= 0 && len(members) >= maxMembers {
+		db.mu.Unlock()
+		return ErrMemberLimitReached
+	}
 	db.data.ProjectMembers[projectID] = append(members, models.ProjectMember{
 		ProjectID: projectID, UserID: userID, Role: "member", Path: "",
 	})
 	db.mu.Unlock()
 	return db.save()
+}
+
+// CountProjectsForUser returns the total number of projects the user belongs to
+// (both owned and joined). Used to enforce the per-user project cap.
+func (db *DB) CountProjectsForUser(userID string) (int, error) {
+	if db.pg != nil {
+		return db.pg.countProjectsForUser(userID)
+	}
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	count := 0
+	for _, members := range db.data.ProjectMembers {
+		for _, m := range members {
+			if m.UserID == userID {
+				count++
+				break
+			}
+		}
+	}
+	return count, nil
 }
 
 func (db *DB) RemoveProjectMember(projectID, userID string) error {
@@ -660,6 +740,7 @@ func (db *DB) AckDelta(projectID, deltaID, userID string) error {
 
 	var kept []models.ProjectDelta
 	changed := false
+	var purgedThrough time.Time
 	for _, d := range deltas {
 		if d.ID != deltaID {
 			kept = append(kept, d)
@@ -679,6 +760,9 @@ func (db *DB) AckDelta(projectID, deltaID, userID string) error {
 		if neededAcks > 0 && len(d.AckedBy) >= neededAcks {
 			// All required recipients acked — purge blob immediately!
 			changed = true
+			if d.CreatedAt.After(purgedThrough) {
+				purgedThrough = d.CreatedAt
+			}
 		} else {
 			kept = append(kept, d)
 		}
@@ -690,10 +774,40 @@ func (db *DB) AckDelta(projectID, deltaID, userID string) error {
 		db.data.Deltas[projectID] = kept
 	}
 
+	if !purgedThrough.IsZero() {
+		db.advanceWatermarkLocked(projectID, purgedThrough)
+	}
+
 	if !changed {
 		return nil
 	}
 	return db.save()
+}
+
+// advanceWatermarkLocked records that every delta created at or before ts has
+// been purged from the relay for this project, so a pull with an older `since`
+// cursor can never silently skip lost blobs. Caller must hold db.mu.
+func (db *DB) advanceWatermarkLocked(projectID string, ts time.Time) {
+	if db.data.DeltaWatermarks == nil {
+		db.data.DeltaWatermarks = make(map[string]time.Time)
+	}
+	if cur, ok := db.data.DeltaWatermarks[projectID]; !ok || ts.After(cur) {
+		db.data.DeltaWatermarks[projectID] = ts
+	}
+}
+
+// GetDeltaPurgeWatermark returns the newest relay-purging cutoff for a project,
+// or the zero time when nothing has been purged yet.
+func (db *DB) GetDeltaPurgeWatermark(projectID string) (time.Time, error) {
+	if db.pg != nil {
+		return db.pg.getDeltaPurgeWatermark(projectID)
+	}
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	if db.data.DeltaWatermarks == nil {
+		return time.Time{}, nil
+	}
+	return db.data.DeltaWatermarks[projectID], nil
 }
 
 func (db *DB) GetDeltas(projectID string, since time.Time) ([]models.ProjectDelta, error) {
@@ -731,12 +845,19 @@ func (db *DB) SweepExpiredDeltas(ttl time.Duration) int {
 
 	for projectID, deltas := range db.data.Deltas {
 		var kept []models.ProjectDelta
+		var purgedThrough time.Time
 		for _, d := range deltas {
 			if d.CreatedAt.After(cutoff) {
 				kept = append(kept, d)
 			} else {
 				swept++
+				if d.CreatedAt.After(purgedThrough) {
+					purgedThrough = d.CreatedAt
+				}
 			}
+		}
+		if !purgedThrough.IsZero() {
+			db.advanceWatermarkLocked(projectID, purgedThrough)
 		}
 		if len(kept) == 0 {
 			delete(db.data.Deltas, projectID)
@@ -806,6 +927,7 @@ func (db *DB) SweepOrphanedProjects(maxAge time.Duration) int {
 		delete(db.data.Tasks, id)
 		delete(db.data.Messages, id)
 		delete(db.data.Deltas, id)
+		delete(db.data.DeltaWatermarks, id)
 	}
 	db.mu.Unlock()
 
@@ -1192,6 +1314,7 @@ func (db *DB) DeleteProject(projectID string) error {
 	delete(db.data.Tasks, projectID)
 	delete(db.data.Deltas, projectID)
 	delete(db.data.Messages, projectID)
+	delete(db.data.DeltaWatermarks, projectID)
 
 	var keptSignals []Signal
 	for _, s := range db.data.Signals {

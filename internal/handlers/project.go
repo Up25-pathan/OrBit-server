@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -17,6 +18,59 @@ import (
 )
 
 const maxRequestBodySize = 26 << 20 // 26 MiB — must exceed maxDeltaDataSize (25 MB) + JSON envelope
+
+// Tier limits: Free = 1 owned project / 2 peers (3 members total).
+// Pro = 10 projects at a time / 10 peers per project (11 members total).
+const (
+	tierMaxProjectsFree = 1
+	tierMaxProjectsPro  = 10
+	tierMaxMembersFree  = 3 // owner + 2 peers
+	tierMaxMembersPro   = 11 // owner + 10 peers
+)
+
+func maxProjectsForTier(tier string) int {
+	switch tier {
+	case "free":
+		return tierMaxProjectsFree
+	case "pro":
+		return tierMaxProjectsPro
+	default: // enterprise and any unknown tier
+		return -1 // no cap
+	}
+}
+
+func maxMembersForTier(tier string) int {
+	switch tier {
+	case "free":
+		return tierMaxMembersFree
+	case "pro":
+		return tierMaxMembersPro
+	default: // enterprise and any unknown tier
+		return -1 // no cap
+	}
+}
+
+func projectLimitMessage(tier string) string {
+	switch tier {
+	case "free":
+		return "Free tier is limited to 1 project at a time (owned or joined). Upgrade to Pro for more."
+	case "pro":
+		return "Pro tier is limited to 10 projects at a time (owned or joined)."
+	default:
+		return "project limit reached"
+	}
+}
+
+func memberLimitMessage(tier string) string {
+	switch tier {
+	case "free":
+		return "Free tier is limited to 2 peers per project (3 members total). Upgrade to Pro for up to 10 peers."
+	case "pro":
+		return "Pro tier is limited to 10 peers per project (11 members total)."
+	default:
+		return "member limit reached"
+	}
+}
 
 type ProjectHandler struct {
 	db         *repository.DB
@@ -41,16 +95,11 @@ func (h *ProjectHandler) Create(w http.ResponseWriter, r *http.Request) {
 	user, err := h.db.GetUserByID(userID)
 	if err != nil || user == nil { writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "user not found"}); return }
 
-	if user.PlanTier == "free" {
-		projects, _ := h.db.ListProjectsForUser(userID)
-		var ownedCount int
-		for _, p := range projects {
-			if p.OwnerID == userID {
-				ownedCount++
-			}
-		}
-		if ownedCount >= 1 {
-			writeJSON(w, http.StatusForbidden, map[string]string{"error": "Free tier is limited to 1 owned project. Upgrade to Pro for unlimited projects."})
+	// The project cap counts BOTH owned and joined projects ("10 projects at a
+	// time"), so joining more projects cannot be a workaround for the cap.
+	if max := maxProjectsForTier(user.PlanTier); max >= 0 {
+		if count, _ := h.db.CountProjectsForUser(userID); count >= max {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": projectLimitMessage(user.PlanTier)})
 			return
 		}
 	}
@@ -59,6 +108,21 @@ func (h *ProjectHandler) Create(w http.ResponseWriter, r *http.Request) {
 	if err != nil { writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()}); return }
 
 	writeJSON(w, http.StatusCreated, project)
+}
+
+// checkProjectCap returns true (and writes the 403 response) if adding userID to
+// a project would put them over their tier's project cap (owned + joined).
+func (h *ProjectHandler) checkProjectCap(w http.ResponseWriter, user *models.User) bool {
+	if user == nil {
+		return false
+	}
+	if max := maxProjectsForTier(user.PlanTier); max >= 0 {
+		if count, _ := h.db.CountProjectsForUser(user.ID); count >= max {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": projectLimitMessage(user.PlanTier)})
+			return true
+		}
+	}
+	return false
 }
 
 func (h *ProjectHandler) List(w http.ResponseWriter, r *http.Request) {
@@ -106,16 +170,28 @@ func (h *ProjectHandler) Invite(w http.ResponseWriter, r *http.Request) {
 	user, err := h.db.GetUserByID(userID)
 	if err != nil || user == nil { writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "user not found"}); return }
 
-	if user.PlanTier == "free" {
-		members, _ := h.db.GetProjectMembers(projectID)
-		if len(members) >= 3 {
-			writeJSON(w, http.StatusForbidden, map[string]string{"error": "Free tier is limited to 2 peers per project (3 members total)."})
-			return
-		}
+	// The invitee also counts against their own project cap (owned + joined) —
+	// but a redundant re-invite of an existing member is a no-op, not a blocker.
+	invitee, _ := h.db.GetUserByID(req.UserID)
+	blocked := false
+	if invitee != nil && !h.db.IsProjectMember(projectID, invitee.ID) {
+		blocked = h.checkProjectCap(w, invitee)
 	}
-
-	if err := h.db.InviteMember(projectID, req.UserID); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()}); return
+	if !blocked {
+		if max := maxMembersForTier(user.PlanTier); max >= 0 {
+			if err := h.db.InviteMemberWithLimit(projectID, req.UserID, max); err != nil {
+				if errors.Is(err, repository.ErrMemberLimitReached) {
+					writeJSON(w, http.StatusForbidden, map[string]string{"error": memberLimitMessage(user.PlanTier)})
+					return
+				}
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+				return
+			}
+		} else {
+			if err := h.db.InviteMember(projectID, req.UserID); err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()}); return
+			}
+		}
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "invited"})
@@ -168,16 +244,29 @@ func (h *ProjectHandler) JoinByToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	owner, _ := h.db.GetUserByID(project.OwnerID)
-	if owner != nil && owner.PlanTier == "free" {
-		members, _ := h.db.GetProjectMembers(projectID)
-		if len(members) >= 3 {
-			writeJSON(w, http.StatusForbidden, map[string]string{"error": "The project owner is on the Free tier, which is limited to 2 peers per project (3 members total)."})
-			return
-		}
+	if owner == nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "project owner not found"}); return
 	}
-
-	if err := h.db.InviteMember(projectID, userID); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()}); return
+	// The joiner counts against their own project cap too (owned + joined).
+	joiner, _ := h.db.GetUserByID(userID)
+	blocked := false
+	if joiner != nil && !h.db.IsProjectMember(projectID, joiner.ID) {
+		blocked = h.checkProjectCap(w, joiner)
+	}
+	if !blocked {
+		if max := maxMembersForTier(owner.PlanTier); max >= 0 {
+			if err := h.db.InviteMemberWithLimit(projectID, userID, max); err != nil {
+				if errors.Is(err, repository.ErrMemberLimitReached) {
+					writeJSON(w, http.StatusForbidden, map[string]string{"error": memberLimitMessage(owner.PlanTier)})
+					return
+				}
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()}); return
+			}
+		} else {
+			if err := h.db.InviteMember(projectID, userID); err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()}); return
+			}
+		}
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "joined", "projectId": projectID})
@@ -237,17 +326,32 @@ func (h *ProjectHandler) JoinProject(w http.ResponseWriter, r *http.Request) {
 	}
 
 	owner, _ := h.db.GetUserByID(project.OwnerID)
-	if owner != nil && owner.PlanTier == "free" {
-		members, _ := h.db.GetProjectMembers(projectID)
-		if len(members) >= 3 {
-			writeJSON(w, http.StatusForbidden, map[string]string{"error": "The project owner is on the Free tier, which is limited to 2 peers per project (3 members total)."})
-			return
-		}
-	}
-
-	if err := h.db.InviteMember(projectID, userID); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	if owner == nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "project owner not found"})
 		return
+	}
+	// The joiner counts against their own project cap too (owned + joined).
+	joiner, _ := h.db.GetUserByID(userID)
+	blocked := false
+	if joiner != nil && !h.db.IsProjectMember(projectID, joiner.ID) {
+		blocked = h.checkProjectCap(w, joiner)
+	}
+	if !blocked {
+		if max := maxMembersForTier(owner.PlanTier); max >= 0 {
+			if err := h.db.InviteMemberWithLimit(projectID, userID, max); err != nil {
+				if errors.Is(err, repository.ErrMemberLimitReached) {
+					writeJSON(w, http.StatusForbidden, map[string]string{"error": memberLimitMessage(owner.PlanTier)})
+					return
+				}
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+				return
+			}
+		} else {
+			if err := h.db.InviteMember(projectID, userID); err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+				return
+			}
+		}
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "joined", "projectId": projectID})
@@ -423,9 +527,26 @@ func (h *ProjectHandler) PullDeltas(w http.ResponseWriter, r *http.Request) {
 	if err != nil { writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()}); return }
 	if deltas == nil { deltas = []models.ProjectDelta{} }
 
+	// Gap detection: when the client sends a `since` cursor and the relay has
+	// since purged deltas (all-ack or 3-day TTL), an incremental pull would
+	// silently skip the blobs the cursor can never catch up with. Flag it via
+	// the X-Orbit-Delta-Gap header so the client re-syncs full state from peers
+	// instead of believing it is up to date. A missing cursor (bootstrap) is
+	// never a gap — the client is already requesting complete history.
+	if !since.IsZero() {
+		wm, err := h.db.GetDeltaPurgeWatermark(projectID)
+		if err == nil && !wm.IsZero() && since.Before(wm) {
+			w.Header().Set("X-Orbit-Delta-Gap", "1")
+		}
+	}
+
 	// Bound every pull response (default 200, hard max 500) so a long-running
 	// project or a burst of pushes can never produce an unbounded reply. Deltas
-	// are stored oldest-first, so we keep the most recent `limit` entries.
+	// are stored oldest-first and we keep the FIRST `limit` entries, so a client
+	// that advances its `since` cursor past the last returned delta can chain
+	// consecutive pages and drain the whole backlog without gaps. (Keeping the
+	// newest `limit` instead would silently drop deltas that fall outside the
+	// window whenever a backlog exceeds the bound.)
 	//
 	// Bootstrap carve-out: when NO `since` cursor is supplied the caller is a
 	// fresh device rebuilding the project from scratch (relay-only clone), which
@@ -448,7 +569,7 @@ func (h *ProjectHandler) PullDeltas(w http.ResponseWriter, r *http.Request) {
 		limit = bootstrapCeiling
 	}
 	if len(deltas) > limit {
-		deltas = deltas[len(deltas)-limit:]
+		deltas = deltas[:limit]
 	}
 
 	sanitized := make([]models.ProjectDelta, len(deltas))

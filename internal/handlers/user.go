@@ -59,13 +59,13 @@ func (h *UserHandler) SyncWebProfile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	info, err := h.validator.Validate(licenseKey)
+	info, err := h.validator.Validate(licenseKey, user.MachineID)
 	if err != nil || info == nil {
 		writeJSON(w, http.StatusOK, user)
 		return
 	}
 
-	updatedUser, err := h.db.UpsertUser(info.UserID, info.Name, info.Email, info.AvatarURL, info.PlanTier, licenseKey, user.MachineID)
+	updatedUser, err := h.db.UpsertUser(info.UserID, info.Name, info.Email, info.AvatarURL, info.PlanTier, licenseKey, user.MachineID, info.Price, info.ExpiresAt)
 	if err != nil {
 		writeJSON(w, http.StatusOK, user)
 		return

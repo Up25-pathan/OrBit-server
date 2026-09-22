@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -208,7 +209,7 @@ func (p *pgStore) loadKV(ctx context.Context, s *store) error {
 	return rows.Err()
 }
 
-func (p *pgStore) upsertUser(id, name, email, avatarURL, planTier, licenseKey, machineID string) (*models.User, error) {
+func (p *pgStore) upsertUser(id, name, email, avatarURL, planTier, licenseKey, machineID string, price float64, expiresAt time.Time) (*models.User, error) {
 	ctx, cancel := pgCtx()
 	defer cancel()
 
@@ -220,16 +221,18 @@ func (p *pgStore) upsertUser(id, name, email, avatarURL, planTier, licenseKey, m
 
 	now := time.Now().UTC()
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO users (id, display_name, email, plan_tier, bio, status, activity, avatar_url, public_key_fingerprint, machine_id, created_at, updated_at)
-		VALUES ($1,$2,$3,$4,'','online','',$5,'',$6,$7,$7)
+		INSERT INTO users (id, display_name, email, plan_tier, bio, status, activity, avatar_url, public_key_fingerprint, machine_id, price, expires_at, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,'','online','',$5,'',$6,$7,$8,$9,$9)
 		ON CONFLICT (id) DO UPDATE SET
 			display_name = EXCLUDED.display_name,
 			email = EXCLUDED.email,
 			plan_tier = EXCLUDED.plan_tier,
 			avatar_url = CASE WHEN EXCLUDED.avatar_url <> '' THEN EXCLUDED.avatar_url ELSE users.avatar_url END,
 			machine_id = EXCLUDED.machine_id,
+			price = EXCLUDED.price,
+			expires_at = EXCLUDED.expires_at,
 			updated_at = EXCLUDED.updated_at`,
-		id, name, email, planTier, avatarURL, machineID, now); err != nil {
+		id, name, email, planTier, avatarURL, machineID, price, expiresAt, now); err != nil {
 		return nil, err
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO license_index (license_key, user_id) VALUES ($1,$2) ON CONFLICT (license_key) DO UPDATE SET user_id = EXCLUDED.user_id`, licenseKey, id); err != nil {
@@ -247,20 +250,63 @@ func (p *pgStore) getUserByID(id string) (*models.User, error) {
 
 	var u models.User
 	var lastSeen *time.Time
+	var expiresAt *time.Time
 	err := p.pool.QueryRow(ctx, `
-		SELECT id, display_name, email, plan_tier, bio, status, activity, avatar_url, public_key_fingerprint, machine_id, last_seen, created_at, updated_at
+		SELECT id, display_name, email, plan_tier, bio, status, activity, avatar_url, public_key_fingerprint, machine_id, price, expires_at, last_seen, created_at, updated_at
 		FROM users WHERE id = $1`, id).Scan(
-		&u.ID, &u.DisplayName, &u.Email, &u.PlanTier, &u.Bio, &u.Status, &u.Activity, &u.AvatarURL, &u.PublicKeyFingerprint, &u.MachineID, &lastSeen, &u.CreatedAt, &u.UpdatedAt)
+		&u.ID, &u.DisplayName, &u.Email, &u.PlanTier, &u.Bio, &u.Status, &u.Activity, &u.AvatarURL, &u.PublicKeyFingerprint, &u.MachineID, &u.Price, &expiresAt, &lastSeen, &u.CreatedAt, &u.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
+	if expiresAt != nil {
+		u.ExpiresAt = *expiresAt
+	}
 	if lastSeen != nil {
 		u.LastSeen = *lastSeen
 	}
 	return &u, nil
+}
+
+func (p *pgStore) getAllUsers() ([]models.User, error) {
+	ctx, cancel := pgCtx()
+	defer cancel()
+
+	rows, err := p.pool.Query(ctx, `
+		SELECT id, display_name, email, plan_tier, bio, status, activity, avatar_url, public_key_fingerprint, machine_id, price, expires_at, last_seen, created_at, updated_at
+		FROM users`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var users []models.User
+	for rows.Next() {
+		var u models.User
+		var lastSeen *time.Time
+		var expiresAt *time.Time
+		if err := rows.Scan(&u.ID, &u.DisplayName, &u.Email, &u.PlanTier, &u.Bio, &u.Status, &u.Activity, &u.AvatarURL, &u.PublicKeyFingerprint, &u.MachineID, &u.Price, &expiresAt, &lastSeen, &u.CreatedAt, &u.UpdatedAt); err != nil {
+			return nil, err
+		}
+		if expiresAt != nil {
+			u.ExpiresAt = *expiresAt
+		}
+		if lastSeen != nil {
+			u.LastSeen = *lastSeen
+		}
+		users = append(users, u)
+	}
+	return users, nil
+}
+
+func (p *pgStore) downgradeUserTier(id string) error {
+	ctx, cancel := pgCtx()
+	defer cancel()
+
+	_, err := p.pool.Exec(ctx, `UPDATE users SET plan_tier = 'free' WHERE id = $1`, id)
+	return err
 }
 
 func (p *pgStore) getUserByLicenseKey(key string) (*models.User, error) {
@@ -546,6 +592,17 @@ func (p *pgStore) listProjectsForUser(userID string) ([]models.Project, error) {
 	return result, rows.Err()
 }
 
+// CountProjectsForUser counts projects the user belongs to (owned OR joined).
+func (p *pgStore) countProjectsForUser(userID string) (int, error) {
+	ctx, cancel := pgCtx()
+	defer cancel()
+	var count int
+	if err := p.pool.QueryRow(ctx, `SELECT COUNT(*) FROM project_members WHERE user_id = $1`, userID).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
 func (p *pgStore) inviteMember(projectID, userID string) error {
 	ctx, cancel := pgCtx()
 	defer cancel()
@@ -576,12 +633,19 @@ func (p *pgStore) inviteMemberWithLimit(projectID, userID string, maxMembers int
 	if !exists {
 		return fmt.Errorf("user not found")
 	}
+	var already bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM project_members WHERE project_id = $1 AND user_id = $2)`, projectID, userID).Scan(&already); err != nil {
+		return err
+	}
+	if already {
+		return tx.Commit(ctx)
+	}
 	var count int
 	if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM project_members WHERE project_id = $1 FOR UPDATE`, projectID).Scan(&count); err != nil {
 		return err
 	}
 	if count >= maxMembers {
-		return fmt.Errorf("member limit reached")
+		return ErrMemberLimitReached
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO project_members (project_id, user_id, role, path) VALUES ($1,$2,'member','') ON CONFLICT DO NOTHING`, projectID, userID); err != nil {
 		return err
@@ -671,7 +735,8 @@ func (p *pgStore) ackDelta(projectID, deltaID, userID string) error {
 	defer tx.Rollback(ctx)
 
 	var authorID string
-	err = tx.QueryRow(ctx, `SELECT author_id FROM deltas WHERE id = $1 AND project_id = $2 FOR UPDATE`, deltaID, projectID).Scan(&authorID)
+	var createdAt time.Time
+	err = tx.QueryRow(ctx, `SELECT author_id, created_at FROM deltas WHERE id = $1 AND project_id = $2 FOR UPDATE`, deltaID, projectID).Scan(&authorID, &createdAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil
 	}
@@ -698,8 +763,32 @@ func (p *pgStore) ackDelta(projectID, deltaID, userID string) error {
 		if _, err := tx.Exec(ctx, `DELETE FROM deltas WHERE id = $1`, deltaID); err != nil {
 			return err
 		}
+		if err := p.advanceDeltaPurgeWatermarkTx(ctx, tx, projectID, createdAt); err != nil {
+			return err
+		}
 	}
 	return tx.Commit(ctx)
+}
+
+// advanceDeltaPurgeWatermarkTx records (per project) the newest created_at of any
+// purged delta, monotonically. Used inside transactions that delete relay blobs.
+func (p *pgStore) advanceDeltaPurgeWatermarkTx(ctx context.Context, tx pgx.Tx, projectID string, ts time.Time) error {
+	_, err := tx.Exec(ctx, `
+		INSERT INTO delta_watermarks (project_id, purged_through) VALUES ($1,$2)
+		ON CONFLICT (project_id) DO UPDATE SET purged_through = GREATEST(delta_watermarks.purged_through, EXCLUDED.purged_through)`,
+		projectID, ts)
+	return err
+}
+
+func (p *pgStore) getDeltaPurgeWatermark(projectID string) (time.Time, error) {
+	ctx, cancel := pgCtx()
+	defer cancel()
+	var ts time.Time
+	err := p.pool.QueryRow(ctx, `SELECT purged_through FROM delta_watermarks WHERE project_id = $1`, projectID).Scan(&ts)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return time.Time{}, nil
+	}
+	return ts, err
 }
 
 func (p *pgStore) getDeltas(projectID string, since time.Time) ([]models.ProjectDelta, error) {
@@ -769,17 +858,84 @@ func (p *pgStore) sweepExpiredDeltas(ttl time.Duration) int {
 	}
 
 	// 4. If TTL is set (or zero for force sweep), purge remaining deltas
+	//    (the member-offline data-loss window). Record the cutoffs so pulls
+	//    with a `since` cursor older than the purge detect a gap and re-sync.
+	//    The CTE returns each DELETEd row so we can both count swept blobs and
+	//    advance per-project watermarks from their created_at timestamps.
 	if ttl <= 0 {
-		if ct, err := p.pool.Exec(ctx, `DELETE FROM deltas`); err == nil {
-			totalSwept += int(ct.RowsAffected())
-		}
+		rows, err := p.pool.Query(ctx, `
+			WITH purged AS (
+				DELETE FROM deltas
+				RETURNING project_id, created_at
+			)
+			SELECT project_id, created_at FROM purged
+		`)
+		totalSwept += advanceWatermarksFromRows(ctx, p, rows, err)
 	} else {
-		if ct, err := p.pool.Exec(ctx, `DELETE FROM deltas WHERE created_at < $1`, time.Now().UTC().Add(-ttl)); err == nil {
-			totalSwept += int(ct.RowsAffected())
-		}
+		rows, err := p.pool.Query(ctx, `
+			WITH purged AS (
+				DELETE FROM deltas WHERE created_at < $1
+				RETURNING project_id, created_at
+			)
+			SELECT project_id, created_at FROM purged
+		`, time.Now().UTC().Add(-ttl))
+		totalSwept += advanceWatermarksFromRows(ctx, p, rows, err)
 	}
 
 	return totalSwept
+}
+
+// advanceWatermarksFromRows consumes a `project_id, created_at` rowset (from a
+// DELETE ... RETURNING) advancing each project's purge watermark to the max
+// created_at, and returns the number of swept rows. It never mutates rows.
+func advanceWatermarksFromRows(ctx context.Context, p *pgStore, rows pgx.Rows, err error) int {
+	if err != nil {
+		return 0
+	}
+	defer rows.Close()
+	type cut struct {
+		projectID string
+		ts        time.Time
+	}
+	var cuts []cut
+	for rows.Next() {
+		var c cut
+		if err := rows.Scan(&c.projectID, &c.ts); err != nil {
+			return 0
+		}
+		cuts = append(cuts, c)
+	}
+	if rows.Err() != nil {
+		return 0
+	}
+	swept := len(cuts)
+	if swept == 0 {
+		return 0
+	}
+	byProject := make(map[string]time.Time)
+	for _, c := range cuts {
+		if prev, ok := byProject[c.projectID]; !ok || c.ts.After(prev) {
+			byProject[c.projectID] = c.ts
+		}
+	}
+	for projectID, ts := range byProject {
+		if err := p.advanceDeltaPurgeWatermark(projectID, ts); err != nil {
+			log.Printf("[delta-sweep] watermark advance failed for %s: %v", projectID, err)
+		}
+	}
+	return swept
+}
+
+// advanceDeltaPurgeWatermark upserts the per-project purge watermark, keeping it
+// monotonic (GREATEST on conflict).
+func (p *pgStore) advanceDeltaPurgeWatermark(projectID string, ts time.Time) error {
+	ctx, cancel := pgCtx()
+	defer cancel()
+	_, err := p.pool.Exec(ctx, `
+		INSERT INTO delta_watermarks (project_id, purged_through) VALUES ($1,$2)
+		ON CONFLICT (project_id) DO UPDATE SET purged_through = GREATEST(delta_watermarks.purged_through, EXCLUDED.purged_through)`,
+		projectID, ts)
+	return err
 }
 
 func (p *pgStore) sweepOrphanedProjects(maxAge time.Duration) int {

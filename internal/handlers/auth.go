@@ -43,14 +43,18 @@ func (h *AuthHandler) AuthenticateKey(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Validate the license key against the authority (mock today, website later)
-	info, err := h.validator.Validate(req.LicenseKey)
+	info, err := h.validator.Validate(req.LicenseKey, req.MachineID)
 	if err != nil {
+		if err.Error() == "license is already bound to maximum allowed devices" {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "License device limit reached."})
+			return
+		}
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid license key"})
 		return
 	}
 
-	// Upsert the user — creates if new, updates metadata if existing
-	user, err := h.db.UpsertUser(info.UserID, info.Name, info.Email, info.AvatarURL, info.PlanTier, req.LicenseKey, req.MachineID)
+	// 2. Local persistence: Upsert user record
+	user, err := h.db.UpsertUser(info.UserID, info.Name, info.Email, info.AvatarURL, info.PlanTier, req.LicenseKey, req.MachineID, info.Price, info.ExpiresAt)
 	if err != nil {
 		if err.Error() == "license is already bound to another device" {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "License is already bound to another device."})
