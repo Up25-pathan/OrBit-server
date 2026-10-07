@@ -1,0 +1,263 @@
+package handlers
+
+import (
+	"encoding/json"
+	"net/http"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/orbit/control-server/internal/license"
+	"github.com/orbit/control-server/internal/middleware"
+	"github.com/orbit/control-server/internal/models"
+	"github.com/orbit/control-server/internal/repository"
+)
+
+type UserHandler struct {
+	db        *repository.DB
+	validator license.LicenseValidator
+}
+
+func NewUserHandler(db *repository.DB, validator license.LicenseValidator) *UserHandler {
+	return &UserHandler{db: db, validator: validator}
+}
+
+func (h *UserHandler) GetProfile(w http.ResponseWriter, r *http.Request) {
+	userID := middleware.GetUserID(r)
+	if userID == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+
+	user, err := h.db.GetUserByID(userID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "server error"})
+		return
+	}
+	if user == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "user not found"})
+		return
+	}
+
+	// Live check against Website Server authority for instant tier sync (Free -> Pro -> Free)
+	licenseKey := h.db.GetLicenseKeyByUserID(userID)
+	if licenseKey != "" && h.validator != nil {
+		info, err := h.validator.Validate(licenseKey, user.MachineID)
+		if err == nil && info != nil {
+			updatedUser, err := h.db.UpsertUser(info.UserID, info.Name, info.Email, info.AvatarURL, info.PlanTier, licenseKey, user.MachineID, info.Price, info.ExpiresAt)
+			if err == nil && updatedUser != nil {
+				user = updatedUser
+			}
+		}
+	}
+
+	writeJSON(w, http.StatusOK, user)
+}
+
+func (h *UserHandler) SyncWebProfile(w http.ResponseWriter, r *http.Request) {
+	userID := middleware.GetUserID(r)
+	if userID == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+
+	user, err := h.db.GetUserByID(userID)
+	if err != nil || user == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "user not found"})
+		return
+	}
+
+	licenseKey := h.db.GetLicenseKeyByUserID(userID)
+	if licenseKey == "" || h.validator == nil {
+		writeJSON(w, http.StatusOK, user)
+		return
+	}
+
+	info, err := h.validator.Validate(licenseKey, user.MachineID)
+	if err != nil || info == nil {
+		writeJSON(w, http.StatusOK, user)
+		return
+	}
+
+	updatedUser, err := h.db.UpsertUser(info.UserID, info.Name, info.Email, info.AvatarURL, info.PlanTier, licenseKey, user.MachineID, info.Price, info.ExpiresAt)
+	if err != nil {
+		writeJSON(w, http.StatusOK, user)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, updatedUser)
+}
+
+type UpdateProfileRequest struct {
+	DisplayName string `json:"displayName"`
+	Bio         string `json:"bio"`
+	AvatarURL   string `json:"avatarUrl"`
+}
+
+func (h *UserHandler) UpdateProfile(w http.ResponseWriter, r *http.Request) {
+	userID := middleware.GetUserID(r)
+	if userID == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
+	var req UpdateProfileRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+		return
+	}
+
+	if req.DisplayName == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "displayName is required"})
+		return
+	}
+	if len(req.DisplayName) > 64 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "displayName must be 64 characters or less"})
+		return
+	}
+	if len(req.Bio) > 512 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bio must be 512 characters or less"})
+		return
+	}
+	if len(req.AvatarURL) > 500000 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "avatarUrl must be 500KB or less"})
+		return
+	}
+
+	if err := h.db.UpdateProfile(userID, req.DisplayName, req.Bio, req.AvatarURL); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to update profile"})
+		return
+	}
+
+	user, _ := h.db.GetUserByID(userID)
+	writeJSON(w, http.StatusOK, user)
+}
+
+func (h *UserHandler) SearchUsers(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query().Get("q")
+
+	users, err := h.db.SearchUsers(query, 20)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "search failed"})
+		return
+	}
+
+	if users == nil {
+		users = []models.UserSearchResult{}
+	}
+
+	writeJSON(w, http.StatusOK, users)
+}
+
+type UpdateKeyRequest struct {
+	Fingerprint string `json:"fingerprint"`
+}
+
+func (h *UserHandler) UpdatePublicKey(w http.ResponseWriter, r *http.Request) {
+	userID := middleware.GetUserID(r)
+	if userID == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
+	var req UpdateKeyRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+		return
+	}
+
+	if err := h.db.UpdatePublicKey(userID, req.Fingerprint); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to update key"})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
+}
+
+type UpdatePresenceRequest struct {
+	Activity string `json:"activity"`
+}
+
+func (h *UserHandler) UpdatePresence(w http.ResponseWriter, r *http.Request) {
+	userID := middleware.GetUserID(r)
+	if userID == "" { writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"}); return }
+
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
+	var req UpdatePresenceRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"}); return
+	}
+
+	if err := h.db.UpdatePresence(userID, req.Activity); err != nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "session expired or user not found"}); return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
+}
+
+func (h *UserHandler) GetPulse(w http.ResponseWriter, r *http.Request) {
+	userID := middleware.GetUserID(r)
+	if userID == "" { writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"}); return }
+
+	targetID := chi.URLParam(r, "id")
+	if targetID == "" { targetID = userID }
+
+	pulse, err := h.db.GetPulse(targetID)
+	if err != nil { writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()}); return }
+	if pulse == nil { pulse = []models.PulseEntry{} }
+
+	writeJSON(w, http.StatusOK, pulse)
+}
+
+func getDMChannel(id1, id2 string) string {
+	if id1 < id2 {
+		return "dm:" + id1 + ":" + id2
+	}
+	return "dm:" + id2 + ":" + id1
+}
+
+func (h *UserHandler) SendDirectMessage(w http.ResponseWriter, r *http.Request) {
+	userID := middleware.GetUserID(r)
+	if userID == "" { writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"}); return }
+
+	targetID := chi.URLParam(r, "id")
+	if targetID == "" { writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target id required"}); return }
+
+	r.Body = http.MaxBytesReader(w, r.Body, 1024*1024)
+	var req models.SendMessageRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"}); return
+	}
+	if req.Text == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "text is required"}); return
+	}
+
+	dmChannel := getDMChannel(userID, targetID)
+	msg, err := h.db.SaveMessage(dmChannel, userID, req.Text)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()}); return
+	}
+
+	writeJSON(w, http.StatusCreated, msg)
+}
+
+func (h *UserHandler) GetDirectMessages(w http.ResponseWriter, r *http.Request) {
+	userID := middleware.GetUserID(r)
+	if userID == "" { writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"}); return }
+
+	targetID := chi.URLParam(r, "id")
+	if targetID == "" { writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target id required"}); return }
+
+	offset := 0
+	limit := 100 // default limit
+	
+	dmChannel := getDMChannel(userID, targetID)
+	msgs, err := h.db.GetMessages(dmChannel, offset, limit)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()}); return
+	}
+	if msgs == nil {
+		msgs = []models.ChatMessage{}
+	}
+
+	writeJSON(w, http.StatusOK, msgs)
+}
