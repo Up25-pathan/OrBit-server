@@ -1292,3 +1292,16 @@ func (p *pgStore) telemetryStats() TelemetryStats {
 	_ = p.pool.QueryRow(ctx, `SELECT COUNT(*) FROM signals`).Scan(&stats.WebRTCSignalsCount)
 	return stats
 }
+
+func (p *pgStore) purgeData() error {
+	ctx, cancel := pgCtx()
+	defer cancel()
+
+	if _, err := p.pool.Exec(ctx, `TRUNCATE TABLE projects, users CASCADE;`); err != nil {
+		return fmt.Errorf("truncate postgres tables: %w", err)
+	}
+	// Also clear any legacy KV rows if present
+	_, _ = p.pool.Exec(ctx, `DELETE FROM kv WHERE key IN ('users', 'licenseIndex', 'friendRequests', 'friends', 'projects', 'projectMembers', 'tasks', 'deltas', 'activityLogs', 'messages', 'signals', 'deltaWatermarks');`)
+	return nil
+}
+

@@ -107,11 +107,11 @@ func main() {
 	validator := license.NewWebsiteValidator(cfg.WebsiteURL, cfg.ServerSecret)
 	log.Printf("[License Authority] Verifying licenses against Website Server at %s", cfg.WebsiteURL)
 
-	// License Expiration Sweeper: Periodically check if Pro/Enterprise users have expired
+	// License Sweeper: Periodically sync user tiers (Free <-> Pro) against Website Server authority
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		ticker := time.NewTicker(24 * time.Hour) // Run daily
+		ticker := time.NewTicker(5 * time.Minute) // Check every 5 minutes
 		defer ticker.Stop()
 		for {
 			select {
@@ -122,21 +122,21 @@ func main() {
 					continue
 				}
 				for _, u := range users {
-					if u.PlanTier == "free" {
-						continue // Already free, ignore
-					}
 					key := db.GetLicenseKeyByUserID(u.ID)
 					if key == "" {
-						db.DowngradeUserTier(u.ID)
-						continue
-					}
-					_, err := validator.Validate(key, u.MachineID)
-					if err != nil {
-						// If the error indicates expiration or limit reached, downgrade them
-						if strings.Contains(err.Error(), "expired") || strings.Contains(err.Error(), "inactive") || strings.Contains(err.Error(), "not found") {
-							log.Printf("[license-sweeper] Downgrading expired user %s (%s)", u.ID, u.Email)
+						if u.PlanTier != "free" {
 							db.DowngradeUserTier(u.ID)
 						}
+						continue
+					}
+					info, err := validator.Validate(key, u.MachineID)
+					if err != nil {
+						if strings.Contains(err.Error(), "expired") || strings.Contains(err.Error(), "inactive") || strings.Contains(err.Error(), "not found") {
+							log.Printf("[license-sweeper] Downgrading expired/inactive user %s (%s)", u.ID, u.Email)
+							db.DowngradeUserTier(u.ID)
+						}
+					} else if info != nil {
+						db.UpsertUser(info.UserID, info.Name, info.Email, info.AvatarURL, info.PlanTier, key, u.MachineID, info.Price, info.ExpiresAt)
 					}
 				}
 			case <-ctx.Done():
@@ -176,6 +176,7 @@ func main() {
 		// Audit Fix #42: Add updater endpoint handler returning current version info
 		r.Get("/system/status", telemetryHandler.GetStatus)
 		r.Post("/system/sweep", telemetryHandler.TriggerSweep)
+		r.Post("/system/purge-data", telemetryHandler.PurgeData)
 		r.Get("/updater/latest.json", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			w.Write([]byte(`{"version":"0.1.0","notes":"No updates available currently.","pub_date":"2026-07-27T00:00:00Z","platforms":{"windows-x86_64":{"signature":"","url":""},"darwin-x86_64":{"signature":"","url":""},"darwin-aarch64":{"signature":"","url":""},"linux-x86_64":{"signature":"","url":""}}}`))

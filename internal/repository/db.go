@@ -1431,3 +1431,30 @@ func (db *DB) GetTelemetryStats() TelemetryStats {
 		WebRTCSignalsCount: len(db.data.Signals),
 	}
 }
+
+// PurgeData clears all users, projects, and related collaboration data from both PostgreSQL and the local store.
+func (db *DB) PurgeData() error {
+	if db.pg != nil {
+		if err := db.pg.purgeData(); err != nil {
+			return err
+		}
+	}
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	db.data.Users = make(map[string]*models.User)
+	db.data.LicenseIndex = make(map[string]string)
+	db.data.FriendRequests = make(map[string]*models.FriendRequest)
+	db.data.Friends = make(map[string][]string)
+	db.data.Projects = make(map[string]*models.Project)
+	db.data.ProjectMembers = make(map[string][]models.ProjectMember)
+	db.data.Tasks = make(map[string][]*models.Task)
+	db.data.Deltas = make(map[string][]models.ProjectDelta)
+	db.data.ActivityLogs = []models.ActivityLog{}
+	db.data.Messages = make(map[string][]*models.ChatMessage)
+	db.data.Signals = []Signal{}
+	db.data.DeltaWatermarks = make(map[string]time.Time)
+
+	return db.saveUnderLock()
+}
+

@@ -3,11 +3,13 @@ package handlers
 import (
 	"encoding/json"
 	"net/http"
+	"os"
 	"runtime"
 	"time"
 
 	"github.com/orbit/control-server/internal/repository"
 )
+
 
 type TelemetryHandler struct {
 	db        *repository.DB
@@ -90,3 +92,34 @@ func (h *TelemetryHandler) TriggerSweep(w http.ResponseWriter, r *http.Request) 
 		"orphans_swept":  orphansSwept,
 	})
 }
+
+// PurgeData verifies the control server secret header and purges users and projects data.
+func (h *TelemetryHandler) PurgeData(w http.ResponseWriter, r *http.Request) {
+	// 1. Verify Secret Header
+	expectedSecret := os.Getenv("CONTROL_SERVER_SECRET")
+	if expectedSecret == "" {
+		expectedSecret = "orbit-control-server-verification-secret-2026"
+	}
+	if r.Header.Get("X-Control-Server-Secret") != expectedSecret {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Unauthorized control server secret"})
+		return
+	}
+
+	// 2. Clear Users and Projects Data
+	if err := h.db.PurgeData(); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to purge control server data: " + err.Error()})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{
+		"status":  "success",
+		"message": "Control Server users and projects purged successfully.",
+	})
+}
+

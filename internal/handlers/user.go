@@ -37,6 +37,18 @@ func (h *UserHandler) GetProfile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Live check against Website Server authority for instant tier sync (Free -> Pro -> Free)
+	licenseKey := h.db.GetLicenseKeyByUserID(userID)
+	if licenseKey != "" && h.validator != nil {
+		info, err := h.validator.Validate(licenseKey, user.MachineID)
+		if err == nil && info != nil {
+			updatedUser, err := h.db.UpsertUser(info.UserID, info.Name, info.Email, info.AvatarURL, info.PlanTier, licenseKey, user.MachineID, info.Price, info.ExpiresAt)
+			if err == nil && updatedUser != nil {
+				user = updatedUser
+			}
+		}
+	}
+
 	writeJSON(w, http.StatusOK, user)
 }
 
