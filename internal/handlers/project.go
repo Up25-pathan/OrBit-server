@@ -95,10 +95,9 @@ func (h *ProjectHandler) Create(w http.ResponseWriter, r *http.Request) {
 	user, err := h.db.GetUserByID(userID)
 	if err != nil || user == nil { writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "user not found"}); return }
 
-	// The project cap counts BOTH owned and joined projects ("10 projects at a
-	// time"), so joining more projects cannot be a workaround for the cap.
+	// The project cap counts owned projects ("1 project for free tier", "10 for pro", etc.).
 	if max := maxProjectsForTier(user.PlanTier); max >= 0 {
-		if count, _ := h.db.CountProjectsForUser(userID); count >= max {
+		if count, _ := h.db.CountOwnedProjectsForUser(userID); count >= max {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": projectLimitMessage(user.PlanTier)})
 			return
 		}
@@ -108,21 +107,6 @@ func (h *ProjectHandler) Create(w http.ResponseWriter, r *http.Request) {
 	if err != nil { writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()}); return }
 
 	writeJSON(w, http.StatusCreated, project)
-}
-
-// checkProjectCap returns true (and writes the 403 response) if adding userID to
-// a project would put them over their tier's project cap (owned + joined).
-func (h *ProjectHandler) checkProjectCap(w http.ResponseWriter, user *models.User) bool {
-	if user == nil {
-		return false
-	}
-	if max := maxProjectsForTier(user.PlanTier); max >= 0 {
-		if count, _ := h.db.CountProjectsForUser(user.ID); count >= max {
-			writeJSON(w, http.StatusForbidden, map[string]string{"error": projectLimitMessage(user.PlanTier)})
-			return true
-		}
-	}
-	return false
 }
 
 func (h *ProjectHandler) List(w http.ResponseWriter, r *http.Request) {
@@ -170,27 +154,31 @@ func (h *ProjectHandler) Invite(w http.ResponseWriter, r *http.Request) {
 	user, err := h.db.GetUserByID(userID)
 	if err != nil || user == nil { writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "user not found"}); return }
 
-	// The invitee also counts against their own project cap (owned + joined) —
-	// but a redundant re-invite of an existing member is a no-op, not a blocker.
 	invitee, _ := h.db.GetUserByID(req.UserID)
-	blocked := false
-	if invitee != nil && !h.db.IsProjectMember(projectID, invitee.ID) {
-		blocked = h.checkProjectCap(w, invitee)
+	if invitee == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "invitee user not found"})
+		return
 	}
-	if !blocked {
-		if max := maxMembersForTier(user.PlanTier); max >= 0 {
-			if err := h.db.InviteMemberWithLimit(projectID, req.UserID, max); err != nil {
-				if errors.Is(err, repository.ErrMemberLimitReached) {
-					writeJSON(w, http.StatusForbidden, map[string]string{"error": memberLimitMessage(user.PlanTier)})
-					return
-				}
-				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+
+	// Redundant re-invite is a no-op, not an error
+	if h.db.IsProjectMember(projectID, invitee.ID) {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "already_member"})
+		return
+	}
+
+	if max := maxMembersForTier(user.PlanTier); max >= 0 {
+		if err := h.db.InviteMemberWithLimit(projectID, req.UserID, max); err != nil {
+			if errors.Is(err, repository.ErrMemberLimitReached) {
+				writeJSON(w, http.StatusForbidden, map[string]string{"error": memberLimitMessage(user.PlanTier)})
 				return
 			}
-		} else {
-			if err := h.db.InviteMember(projectID, req.UserID); err != nil {
-				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()}); return
-			}
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+	} else {
+		if err := h.db.InviteMember(projectID, req.UserID); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
 		}
 	}
 
@@ -247,25 +235,23 @@ func (h *ProjectHandler) JoinByToken(w http.ResponseWriter, r *http.Request) {
 	if owner == nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "project owner not found"}); return
 	}
-	// The joiner counts against their own project cap too (owned + joined).
-	joiner, _ := h.db.GetUserByID(userID)
-	blocked := false
-	if joiner != nil && !h.db.IsProjectMember(projectID, joiner.ID) {
-		blocked = h.checkProjectCap(w, joiner)
+
+	if h.db.IsProjectMember(projectID, userID) {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "already_member", "projectId": projectID})
+		return
 	}
-	if !blocked {
-		if max := maxMembersForTier(owner.PlanTier); max >= 0 {
-			if err := h.db.InviteMemberWithLimit(projectID, userID, max); err != nil {
-				if errors.Is(err, repository.ErrMemberLimitReached) {
-					writeJSON(w, http.StatusForbidden, map[string]string{"error": memberLimitMessage(owner.PlanTier)})
-					return
-				}
-				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()}); return
+
+	if max := maxMembersForTier(owner.PlanTier); max >= 0 {
+		if err := h.db.InviteMemberWithLimit(projectID, userID, max); err != nil {
+			if errors.Is(err, repository.ErrMemberLimitReached) {
+				writeJSON(w, http.StatusForbidden, map[string]string{"error": memberLimitMessage(owner.PlanTier)})
+				return
 			}
-		} else {
-			if err := h.db.InviteMember(projectID, userID); err != nil {
-				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()}); return
-			}
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()}); return
+		}
+	} else {
+		if err := h.db.InviteMember(projectID, userID); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()}); return
 		}
 	}
 
@@ -330,27 +316,20 @@ func (h *ProjectHandler) JoinProject(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "project owner not found"})
 		return
 	}
-	// The joiner counts against their own project cap too (owned + joined).
-	joiner, _ := h.db.GetUserByID(userID)
-	blocked := false
-	if joiner != nil && !h.db.IsProjectMember(projectID, joiner.ID) {
-		blocked = h.checkProjectCap(w, joiner)
-	}
-	if !blocked {
-		if max := maxMembersForTier(owner.PlanTier); max >= 0 {
-			if err := h.db.InviteMemberWithLimit(projectID, userID, max); err != nil {
-				if errors.Is(err, repository.ErrMemberLimitReached) {
-					writeJSON(w, http.StatusForbidden, map[string]string{"error": memberLimitMessage(owner.PlanTier)})
-					return
-				}
-				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+
+	if max := maxMembersForTier(owner.PlanTier); max >= 0 {
+		if err := h.db.InviteMemberWithLimit(projectID, userID, max); err != nil {
+			if errors.Is(err, repository.ErrMemberLimitReached) {
+				writeJSON(w, http.StatusForbidden, map[string]string{"error": memberLimitMessage(owner.PlanTier)})
 				return
 			}
-		} else {
-			if err := h.db.InviteMember(projectID, userID); err != nil {
-				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-				return
-			}
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+	} else {
+		if err := h.db.InviteMember(projectID, userID); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
 		}
 	}
 

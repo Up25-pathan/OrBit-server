@@ -627,7 +627,7 @@ func (db *DB) inviteMemberJSON(projectID, userID string, maxMembers int) error {
 }
 
 // CountProjectsForUser returns the total number of projects the user belongs to
-// (both owned and joined). Used to enforce the per-user project cap.
+// (both owned and joined).
 func (db *DB) CountProjectsForUser(userID string) (int, error) {
 	if db.pg != nil {
 		return db.pg.countProjectsForUser(userID)
@@ -645,6 +645,24 @@ func (db *DB) CountProjectsForUser(userID string) (int, error) {
 	}
 	return count, nil
 }
+
+// CountOwnedProjectsForUser returns the total number of projects owned by the user.
+// Used to enforce the per-user project creation cap.
+func (db *DB) CountOwnedProjectsForUser(userID string) (int, error) {
+	if db.pg != nil {
+		return db.pg.countOwnedProjectsForUser(userID)
+	}
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	count := 0
+	for _, prj := range db.data.Projects {
+		if prj.OwnerID == userID {
+			count++
+		}
+	}
+	return count, nil
+}
+
 
 func (db *DB) RemoveProjectMember(projectID, userID string) error {
 	if db.pg != nil {

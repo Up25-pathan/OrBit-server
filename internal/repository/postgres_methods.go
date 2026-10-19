@@ -603,6 +603,18 @@ func (p *pgStore) countProjectsForUser(userID string) (int, error) {
 	return count, nil
 }
 
+// countOwnedProjectsForUser counts projects owned by the user.
+func (p *pgStore) countOwnedProjectsForUser(userID string) (int, error) {
+	ctx, cancel := pgCtx()
+	defer cancel()
+	var count int
+	if err := p.pool.QueryRow(ctx, `SELECT COUNT(*) FROM projects WHERE owner_id = $1`, userID).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+
 func (p *pgStore) inviteMember(projectID, userID string) error {
 	ctx, cancel := pgCtx()
 	defer cancel()
