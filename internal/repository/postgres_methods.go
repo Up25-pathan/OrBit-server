@@ -653,7 +653,7 @@ func (p *pgStore) inviteMemberWithLimit(projectID, userID string, maxMembers int
 		return tx.Commit(ctx)
 	}
 	var count int
-	if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM project_members WHERE project_id = $1 FOR UPDATE`, projectID).Scan(&count); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM project_members WHERE project_id = $1`, projectID).Scan(&count); err != nil {
 		return err
 	}
 	if count >= maxMembers {
