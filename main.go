@@ -21,6 +21,7 @@ import (
 	"github.com/orbit/control-server/internal/logger"
 	"github.com/orbit/control-server/internal/middleware"
 	"github.com/orbit/control-server/internal/repository"
+	"github.com/orbit/control-server/internal/tunnel"
 	"github.com/orbit/control-server/internal/websocket"
 )
 
@@ -152,6 +153,8 @@ func main() {
 	wsHub := websocket.NewHub(db)
 	signalingHandler := handlers.NewSignalingHandler(db, wsHub)
 	telemetryHandler := handlers.NewTelemetryHandler(db)
+	tunnelManager := tunnel.NewTunnelManager(jwtSecret)
+	tunnelManager.StartSweeper(ctx)
 
 	r := chi.NewRouter()
 	r.Use(corsMiddleware)
@@ -169,6 +172,10 @@ func main() {
 	r.Head("/", healthHandler)
 	r.Get("/health", healthHandler)
 	r.Head("/health", healthHandler)
+
+	// OrBit GO: Ephemeral 10-Minute Public Showcase Live Reverse Proxy
+	r.HandleFunc("/live/{sessionId}", tunnelManager.HandlePublicProxy)
+	r.HandleFunc("/live/{sessionId}/*", tunnelManager.HandlePublicProxy)
 
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Get("/health", healthHandler)
@@ -197,6 +204,10 @@ func main() {
 
 		// License Key Authentication — single endpoint, no signup/signin
 		r.Post("/auth/license", authHandler.AuthenticateKey)
+
+		// OrBit GO: Live Tunnel WebSocket Gateway for Local Dev Agent & Public Status
+		r.Get("/tunnel/ws", tunnelManager.HandleWebSocket)
+		r.Get("/tunnel/{sessionId}/status", tunnelManager.HandleGetSessionStatus)
 
 		r.Group(func(r chi.Router) {
 			r.Use(middleware.AuthMiddleware(jwtSecret, func(userID string) bool {
@@ -265,6 +276,11 @@ func main() {
 			r.Post("/projects/{id}/signal", signalingHandler.SendSignal)
 			r.Get("/projects/{id}/signals", signalingHandler.GetSignals)
 			r.Get("/projects/{id}/ws", wsHub.HandleWebSocket)
+
+			// OrBit GO: Live Reverse Tunnel Management
+			r.Post("/tunnel/create", tunnelManager.HandleCreateSession)
+			r.Post("/tunnel/{sessionId}/extend", tunnelManager.HandleExtendSession)
+			r.Delete("/tunnel/{sessionId}", tunnelManager.HandleStopSession)
 		})
 	})
 

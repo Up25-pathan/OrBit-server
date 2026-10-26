@@ -85,12 +85,15 @@ func AuthMiddleware(jwtSecret string, isValidUser func(string) bool) func(http.H
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			auth := r.Header.Get("Authorization")
-			if auth == "" || !strings.HasPrefix(auth, "Bearer ") {
+			tokenStr := ""
+			if auth != "" && strings.HasPrefix(auth, "Bearer ") {
+				tokenStr = strings.TrimPrefix(auth, "Bearer ")
+			} else if qToken := r.URL.Query().Get("token"); qToken != "" {
+				tokenStr = qToken
+			} else {
 				http.Error(w, `{"error":"missing authorization header"}`, http.StatusUnauthorized)
 				return
 			}
-
-			tokenStr := strings.TrimPrefix(auth, "Bearer ")
 			claims, err := VerifyToken(tokenStr, jwtSecret)
 			if err != nil {
 				http.Error(w, `{"error":"invalid token"}`, http.StatusUnauthorized)
