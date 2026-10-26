@@ -372,13 +372,66 @@ func (tm *TunnelManager) HandlePublicProxy(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	atomic.AddInt64(&session.VisitorCount, 1)
-
 	// Construct local destination path (with query params)
 	destPath := "/" + strings.TrimPrefix(subpath, "/")
 	if r.URL.RawQuery != "" {
 		destPath += "?" + r.URL.RawQuery
 	}
+
+	tm.proxyToSession(w, r, session, destPath)
+}
+
+// HandleFallbackProxy catches any root-relative asset requests (like /_next/*, /assets/*, /favicon.ico)
+// that were requested by an active live preview session using cookie or Referer.
+func (tm *TunnelManager) HandleFallbackProxy(w http.ResponseWriter, r *http.Request) {
+	sessionID := ""
+
+	// 1. Check Cookie
+	if c, err := r.Cookie("orbit_live_session"); err == nil && c.Value != "" {
+		sessionID = c.Value
+	}
+
+	// 2. Fallback to Referer
+	if sessionID == "" {
+		if ref := r.Header.Get("Referer"); ref != "" {
+			if idx := strings.Index(ref, "/live/"); idx != -1 {
+				rest := ref[idx+len("/live/"):]
+				if slashIdx := strings.Index(rest, "/"); slashIdx != -1 {
+					sessionID = rest[:slashIdx]
+				} else if qIdx := strings.Index(rest, "?"); qIdx != -1 {
+					sessionID = rest[:qIdx]
+				} else {
+					sessionID = rest
+				}
+			}
+		}
+	}
+
+	if sessionID != "" {
+		if session, exists := tm.GetSession(sessionID); exists && session.Active && time.Now().Before(session.ExpiresAt) {
+			destPath := r.URL.Path
+			if r.URL.RawQuery != "" {
+				destPath += "?" + r.URL.RawQuery
+			}
+			tm.proxyToSession(w, r, session, destPath)
+			return
+		}
+	}
+
+	http.NotFound(w, r)
+}
+
+func (tm *TunnelManager) proxyToSession(w http.ResponseWriter, r *http.Request, session *TunnelSession, destPath string) {
+	session.connMu.Lock()
+	conn := session.conn
+	session.connMu.Unlock()
+
+	if conn == nil {
+		renderWaitingPage(w, session.ID, session.Port)
+		return
+	}
+
+	atomic.AddInt64(&session.VisitorCount, 1)
 
 	// Read body if present
 	var bodyB64 string
@@ -403,7 +456,7 @@ func (tm *TunnelManager) HandlePublicProxy(w http.ResponseWriter, r *http.Reques
 	}
 	headers["X-Forwarded-For"] = r.RemoteAddr
 	headers["X-Forwarded-Proto"] = "https"
-	headers["X-Orbit-Tunnel"] = sessionID
+	headers["X-Orbit-Tunnel"] = session.ID
 
 	reqID := fmt.Sprintf("req-%d-%s", time.Now().UnixNano(), randomString(3))
 	reqMsg := TunnelRequestMsg{
@@ -452,7 +505,9 @@ func (tm *TunnelManager) HandlePublicProxy(w http.ResponseWriter, r *http.Reques
 		contentType := ""
 		for k, v := range resp.Headers {
 			lowerK := strings.ToLower(k)
-			if lowerK == "transfer-encoding" || lowerK == "content-length" {
+			if lowerK == "transfer-encoding" || lowerK == "content-length" ||
+				lowerK == "x-frame-options" || lowerK == "content-security-policy" ||
+				lowerK == "content-security-policy-report-only" {
 				continue
 			}
 			if lowerK == "content-type" {
@@ -461,10 +516,23 @@ func (tm *TunnelManager) HandlePublicProxy(w http.ResponseWriter, r *http.Reques
 			w.Header().Set(k, v)
 		}
 
-		// If HTML document, inject <base href="/live/{sessionId}/"> so relative assets/links resolve correctly
+		// Set cookie on root path so all subsequent asset requests (/_next/*, etc.) route to this session
+		http.SetCookie(w, &http.Cookie{
+			Name:     "orbit_live_session",
+			Value:    session.ID,
+			Path:     "/",
+			Expires:  session.ExpiresAt,
+			SameSite: http.SameSiteLaxMode,
+		})
+
+		// Allow embedding in in-app device cockpit frames and external iframes
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS, HEAD, PATCH")
+		w.Header().Set("Access-Control-Allow-Headers", "*")
+
+		// If HTML document, rewrite root paths and inject bridge script
 		if strings.Contains(strings.ToLower(contentType), "text/html") && len(respBody) > 0 {
-			baseHref := fmt.Sprintf("/live/%s/", session.ID)
-			respBody = injectBaseHref(respBody, baseHref)
+			respBody = rewriteHTMLAndInjectBridge(respBody, session.ID)
 		}
 
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(respBody)))
@@ -484,9 +552,31 @@ func (tm *TunnelManager) HandlePublicProxy(w http.ResponseWriter, r *http.Reques
 	}
 }
 
-// injectBaseHref injects <base href="baseHref"> into HTML so SPAs, Vite, Next.js relative assets work.
-func injectBaseHref(html []byte, baseHref string) []byte {
-	baseTag := []byte(fmt.Sprintf(`<base href="%s">`, baseHref))
+// rewriteHTMLAndInjectBridge injects base tag, asset bridge script, and rewrites root assets for Next.js/Vite
+func rewriteHTMLAndInjectBridge(html []byte, sessionID string) []byte {
+	prefix := fmt.Sprintf("/live/%s", sessionID)
+
+	// Rewrite common root asset paths in HTML
+	rewrites := []struct {
+		from string
+		to   string
+	}{
+		{`"/_next/`, fmt.Sprintf(`"%s/_next/`, prefix)},
+		{`'/_next/`, fmt.Sprintf(`'%s/_next/`, prefix)},
+		{`"/assets/`, fmt.Sprintf(`"%s/assets/`, prefix)},
+		{`'assets/`, fmt.Sprintf(`'%s/assets/`, prefix)},
+		{`"/static/`, fmt.Sprintf(`"%s/static/`, prefix)},
+		{`"/src/`, fmt.Sprintf(`"%s/src/`, prefix)},
+		{`"/@vite/`, fmt.Sprintf(`"%s/@vite/`, prefix)},
+		{`"/@fs/`, fmt.Sprintf(`"%s/@fs/`, prefix)},
+	}
+
+	for _, rw := range rewrites {
+		html = bytes.ReplaceAll(html, []byte(rw.from), []byte(rw.to))
+	}
+
+	// Injected bridge script intercepting client-side fetch & XHR calls
+	bridgeScript := fmt.Sprintf(`<base href="%s/"><script>(function(){var p='%s';var of=window.fetch;if(of){window.fetch=function(u,i){if(typeof u==='string'&&u.charAt(0)==='/'&&u.indexOf(p)!==0){u=p+u;}return of.call(this,u,i);};}var oo=window.XMLHttpRequest&&window.XMLHttpRequest.prototype.open;if(oo){window.XMLHttpRequest.prototype.open=function(m,u){if(typeof u==='string'&&u.charAt(0)==='/'&&u.indexOf(p)!==0){u=p+u;}return oo.apply(this,arguments);};}})();</script>`, prefix, prefix)
 
 	// Look for <head>
 	lowerHTML := bytes.ToLower(html)
@@ -495,7 +585,7 @@ func injectBaseHref(html []byte, baseHref string) []byte {
 		insertAt := headIdx + len("<head>")
 		var buf bytes.Buffer
 		buf.Write(html[:insertAt])
-		buf.Write(baseTag)
+		buf.WriteString(bridgeScript)
 		buf.Write(html[insertAt:])
 		return buf.Bytes()
 	}
@@ -507,13 +597,16 @@ func injectBaseHref(html []byte, baseHref string) []byte {
 		insertAt := loc[1]
 		var buf bytes.Buffer
 		buf.Write(html[:insertAt])
-		buf.Write(baseTag)
+		buf.WriteString(bridgeScript)
 		buf.Write(html[insertAt:])
 		return buf.Bytes()
 	}
 
-	// Fallback: prepend
-	return append(baseTag, html...)
+	// Fallback
+	var buf bytes.Buffer
+	buf.WriteString(bridgeScript)
+	buf.Write(html)
+	return buf.Bytes()
 }
 
 // HTTP REST Handlers

@@ -177,6 +177,9 @@ func main() {
 	r.HandleFunc("/live/{sessionId}", tunnelManager.HandlePublicProxy)
 	r.HandleFunc("/live/{sessionId}/*", tunnelManager.HandlePublicProxy)
 
+	// OrBit GO: Intercept any root-relative assets (/_next/*, /assets/*, etc.) requested by live preview sessions
+	r.NotFound(tunnelManager.HandleFallbackProxy)
+
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Get("/health", healthHandler)
 		r.Head("/health", healthHandler)
