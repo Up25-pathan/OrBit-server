@@ -382,7 +382,7 @@ func (tm *TunnelManager) HandlePublicProxy(w http.ResponseWriter, r *http.Reques
 }
 
 // HandleFallbackProxy catches any root-relative asset requests (like /_next/*, /assets/*, /favicon.ico)
-// that were requested by an active live preview session using cookie or Referer.
+// that were requested by an active live preview session using cookie, Referer, or active session fallback.
 func (tm *TunnelManager) HandleFallbackProxy(w http.ResponseWriter, r *http.Request) {
 	sessionID := ""
 
@@ -404,6 +404,33 @@ func (tm *TunnelManager) HandleFallbackProxy(w http.ResponseWriter, r *http.Requ
 					sessionID = rest
 				}
 			}
+		}
+	}
+
+	// 3. Fallback to single active session if cookies and referer are blocked by browser/sandbox
+	if sessionID == "" {
+		tm.mu.RLock()
+		var candidate *TunnelSession
+		now := time.Now()
+		for _, s := range tm.sessions {
+			if s.Active && now.Before(s.ExpiresAt) {
+				s.connMu.Lock()
+				hasConn := s.conn != nil
+				s.connMu.Unlock()
+				if hasConn {
+					if candidate == nil {
+						candidate = s
+					} else {
+						// Multiple active sessions; cannot disambiguate safely
+						candidate = nil
+						break
+					}
+				}
+			}
+		}
+		tm.mu.RUnlock()
+		if candidate != nil {
+			sessionID = candidate.ID
 		}
 	}
 
@@ -447,7 +474,8 @@ func (tm *TunnelManager) proxyToSession(w http.ResponseWriter, r *http.Request, 
 	for k, v := range r.Header {
 		lowerKey := strings.ToLower(k)
 		if lowerKey == "host" || lowerKey == "connection" || lowerKey == "upgrade" ||
-			lowerKey == "sec-websocket-key" || lowerKey == "sec-websocket-version" {
+			lowerKey == "sec-websocket-key" || lowerKey == "sec-websocket-version" ||
+			lowerKey == "accept-encoding" {
 			continue
 		}
 		if len(v) > 0 {
@@ -506,6 +534,7 @@ func (tm *TunnelManager) proxyToSession(w http.ResponseWriter, r *http.Request, 
 		for k, v := range resp.Headers {
 			lowerK := strings.ToLower(k)
 			if lowerK == "transfer-encoding" || lowerK == "content-length" ||
+				lowerK == "content-encoding" ||
 				lowerK == "x-frame-options" || lowerK == "content-security-policy" ||
 				lowerK == "content-security-policy-report-only" {
 				continue
@@ -516,13 +545,15 @@ func (tm *TunnelManager) proxyToSession(w http.ResponseWriter, r *http.Request, 
 			w.Header().Set(k, v)
 		}
 
-		// Set cookie on root path so all subsequent asset requests (/_next/*, etc.) route to this session
+		// Set cookie on root path with SameSite=None and Secure=true so all subsequent asset requests (/_next/*, etc.)
+		// in iframes and cross-site devices automatically route to this session
 		http.SetCookie(w, &http.Cookie{
 			Name:     "orbit_live_session",
 			Value:    session.ID,
 			Path:     "/",
 			Expires:  session.ExpiresAt,
-			SameSite: http.SameSiteLaxMode,
+			SameSite: http.SameSiteNoneMode,
+			Secure:   true,
 		})
 
 		// Allow embedding in in-app device cockpit frames and external iframes
@@ -575,8 +606,12 @@ func rewriteHTMLAndInjectBridge(html []byte, sessionID string) []byte {
 		html = bytes.ReplaceAll(html, []byte(rw.from), []byte(rw.to))
 	}
 
-	// Injected bridge script intercepting client-side fetch & XHR calls
-	bridgeScript := fmt.Sprintf(`<base href="%s/"><script>(function(){var p='%s';var of=window.fetch;if(of){window.fetch=function(u,i){if(typeof u==='string'&&u.charAt(0)==='/'&&u.indexOf(p)!==0){u=p+u;}return of.call(this,u,i);};}var oo=window.XMLHttpRequest&&window.XMLHttpRequest.prototype.open;if(oo){window.XMLHttpRequest.prototype.open=function(m,u){if(typeof u==='string'&&u.charAt(0)==='/'&&u.indexOf(p)!==0){u=p+u;}return oo.apply(this,arguments);};}})();</script>`, prefix, prefix)
+	// Comprehensive client-side bridge script:
+	// 1. Sets base href for relative assets
+	// 2. Intercepts fetch and XMLHttpRequest
+	// 3. Intercepts dynamic script and link tag injections (Webpack dynamic chunks, Vite HMR chunks)
+	// 4. Intercepts setAttribute calls
+	bridgeScript := fmt.Sprintf(`<base href="%s/"><script>(function(){var p='%s';var of=window.fetch;if(of){window.fetch=function(u,i){if(typeof u==='string'&&u.charAt(0)==='/'&&u.indexOf(p)!==0){u=p+u;}return of.call(this,u,i);};}var oo=window.XMLHttpRequest&&window.XMLHttpRequest.prototype.open;if(oo){window.XMLHttpRequest.prototype.open=function(m,u){if(typeof u==='string'&&u.charAt(0)==='/'&&u.indexOf(p)!==0){u=p+u;}return oo.apply(this,arguments);};}var sDesc=Object.getOwnPropertyDescriptor(HTMLScriptElement.prototype,'src');if(sDesc&&sDesc.set){var origSSet=sDesc.set;Object.defineProperty(HTMLScriptElement.prototype,'src',{set:function(v){if(typeof v==='string'&&v.charAt(0)==='/'&&v.indexOf(p)!==0){v=p+v;}return origSSet.call(this,v);},get:sDesc.get});}var lDesc=Object.getOwnPropertyDescriptor(HTMLLinkElement.prototype,'href');if(lDesc&&lDesc.set){var origLSet=lDesc.set;Object.defineProperty(HTMLLinkElement.prototype,'href',{set:function(v){if(typeof v==='string'&&v.charAt(0)==='/'&&v.indexOf(p)!==0){v=p+v;}return origLSet.call(this,v);},get:lDesc.get});}var origSetAttr=Element.prototype.setAttribute;Element.prototype.setAttribute=function(n,v){if((n==='src'||n==='href')&&typeof v==='string'&&v.charAt(0)==='/'&&v.indexOf(p)!==0){v=p+v;}return origSetAttr.call(this,n,v);};})();</script>`, prefix, prefix)
 
 	// Look for <head>
 	lowerHTML := bytes.ToLower(html)
